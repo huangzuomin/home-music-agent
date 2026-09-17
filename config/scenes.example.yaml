@@ -1,0 +1,38 @@
+# 场景曲单配置示例（IMP-06）
+# 复制为 scenes.yaml 并按本地曲库实际曲目填写。
+# 纪律：曲目必须来自部署方有权限的内容；attributes.vocal 只有
+# verified_no / verified_yes / unknown 三态，unknown 不能当满足；
+# offline_verified 仅在实际播放验证后置 true。
+scenes:
+  - id: focus
+    name: 专注
+    enabled: true
+    coverage_target_min: 45
+    constraints:
+      no_vocal: true            # 无人声硬约束：只接受 verified_no 的候选
+    candidates:
+      - uri: library://track/101
+        title: "Gymnopédie No.1（示例，替换为实际曲目）"
+        artist: "Erik Satie"
+        duration_sec: 210
+        attributes:
+          vocal: verified_no
+        offline_verified: true
+        verified_at: "2026-09-18T09:00:00+08:00"
+        source: library
+
+  - id: relax
+    name: 松弛
+    enabled: false              # 曲单未就绪 → /scenes 显式 disabled
+    coverage_target_min: 45
+    constraints:
+      no_vocal: false
+    candidates: []
+
+  - id: together
+    name: 一起听
+    enabled: false
+    coverage_target_min: 45
+    constraints:
+      no_vocal: false
+    candidates: []

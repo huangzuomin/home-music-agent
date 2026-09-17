@@ -5,3 +5,4 @@ uvicorn[standard]==0.34.0
 edge-tts==7.2.8
 # IMP-03b：ma_reader WS 事件流（读事件/探针）
 websockets>=12.0
+pyyaml>=6.0
