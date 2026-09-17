@@ -51,6 +51,9 @@ def vg(monkeypatch, tmp_path):
 
     from tests.fakes.fake_ha import FakeHA
     from tests.fakes.fake_llm import FakeLLM
+    from tests.fakes.fake_ma import FakeMA
+
+    import context as context_mod
 
     fake_ha = FakeHA()
     fake_ha.states.update({
@@ -58,21 +61,34 @@ def vg(monkeypatch, tmp_path):
         "sensor.ma_now_playing": "晴天，周杰伦",
     })
     fake_llm = FakeLLM()
+    fake_ma = FakeMA()
     store = vg_app.session_mod.SessionStore(
         path=tmp_path / "agent-sessions.jsonl")
+    fake_history = context_mod.TrackHistory(
+        path=tmp_path / "track-history.jsonl")
 
     monkeypatch.setattr(vg_app, "ha", fake_ha)
     monkeypatch.setattr(vg_app, "_sessions", store)
     monkeypatch.setattr(vg_app, "get_sessions", lambda: store)
     monkeypatch.setattr(vg_app, "get_llm", lambda: fake_llm)
-    monkeypatch.setattr(vg_app, "_ma", None)
-    monkeypatch.setattr(vg_app, "_history", None)
-    monkeypatch.setattr(vg_app, "get_ma",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("此用例不应触碰真实/未打桩的 MA")))
-    monkeypatch.setattr(vg_app, "get_history",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("此用例不应触碰未打桩的 TrackHistory")))
+    monkeypatch.setattr(vg_app, "_ma", fake_ma)
+    monkeypatch.setattr(vg_app, "get_ma", lambda: fake_ma)
+    monkeypatch.setattr(vg_app, "_history", fake_history)
+    monkeypatch.setattr(vg_app, "get_history", lambda: fake_history)
+
+    # IMP-03c：控制核心与存储单例按测试重建（否则跨测试持有旧 executor）
+    from tests.fakes.fake_ha import FakeHA as _FakeHA  # noqa: F401
+    ctrl_store = vg_app.storage_mod.ControlStore(
+        db_path=tmp_path / "control.db")
+    executor = vg_app.ha_executor_mod.HAExecutor(
+        fake_ha, queue_resolver=lambda pid: fake_ma.queue_state(pid))
+    coord = vg_app.coordinator_mod.CommandCoordinator(
+        store=ctrl_store, executor=executor,
+        default_player={"player_id": "sq-1", "player_name": "Squeezebox Touch"})
+    monkeypatch.setattr(vg_app, "_control_store", ctrl_store)
+    monkeypatch.setattr(vg_app, "get_control_store", lambda: ctrl_store)
+    monkeypatch.setattr(vg_app, "_coordinator", coord)
+    monkeypatch.setattr(vg_app, "get_coordinator", lambda: coord)
 
     client = TestClient(vg_app.app)
     return vg_app, client, fake_ha, fake_llm, store

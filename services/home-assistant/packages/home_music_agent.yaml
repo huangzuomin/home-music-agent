@@ -111,6 +111,22 @@ input_text:
     max: 255
 
 script:
+  # IMP-03c：统一短执行器——HA 只接收已解析的短动作（ma_command + 参数 JSON
+  # + command_id）。慢搜索/模型推理不进入本脚本（ADR-03）。
+  music_execute_v1:
+    alias: "音乐：统一短执行器 v1"
+    fields:
+      ma_command:
+        description: "MA 命令名（如 player_queues/next）"
+      ma_args_json:
+        description: "MA 参数（JSON 字符串，由网关预序列化）"
+      command_id:
+        description: "网关命令 id（对账/追踪用）"
+    sequence:
+      - service: rest_command.ma_call
+        data:
+          ma_command: "{{ ma_command }}"
+          ma_args: "{{ ma_args_json }}"
   # ---------------------------------------------------------------- 基础控制
   music_play_pause:
     alias: "音乐：播放/暂停"

@@ -1,28 +1,27 @@
-"""T11 —— 同一 request_id 重试两次「下一首」，实际只切一次（当前为缺陷，xfail）。
+"""T11 —— 同一 request_id 重试两次「下一首」，实际只切一次（IMP-03c 翻绿）。
 
-对应 review：G03/G07（请求受理、执行确认与幂等未分离）。
-根因（源码级）：/command 与 /agent 均不接收 request_id，也没有任何
-幂等约束——网络重试会原样重复执行非幂等动作（next/previous）。
-修复归属 IMP-03（CommandCoordinator：认证设备 + request_id 唯一约束）。
+对应 review：G03/G07。IMP-03c 起由 CommandCoordinator 提供幂等：
+(device_id, request_id) 唯一约束——网络重试返回原命令，不重复执行
+非幂等动作（next/previous）。
 """
 from __future__ import annotations
 
-import pytest
 
-
-@pytest.mark.xfail(strict=True, reason="G03/T11：request_id 无幂等约束，修复在 IMP-03")
 def test_t11_retry_same_request_id_next__executes_once(vg):
     vg_app, client, fake_ha, _, _ = vg
 
-    # 同一个 request_id 因网络重试发送两次（当前 API 甚至不接收该字段）
+    # 同一个 request_id 因网络重试发送两次
     for _ in range(2):
         client.post("/agent", json={
             "text": "下一首", "session_id": "s-t11",
             "request_id": "req-next-1"})
 
-    nexts = [name for name, _ in fake_ha.script_calls if name == "music_next"]
-    assert len(nexts) == 1, (
-        "同一 request_id 的重试应只执行一次 next，实际执行了 %d 次" % len(nexts))
+    # IMP-03c：写动作经 script.music_execute_v1 下发（ma_args 含 next）
+    execs = [c for c in fake_ha.script_calls
+             if c[0] == "music_execute_v1"
+             and "next" in c[1].get("ma_command", "")]
+    assert len(execs) == 1, (
+        "同一 request_id 的重试应只执行一次 next，实际 %d 次" % len(execs))
 
 
 def test_t22_companion_different_intent_not_rerouted(vg):
@@ -30,4 +29,5 @@ def test_t22_companion_different_intent_not_rerouted(vg):
     vg_app, client, fake_ha, _, _ = vg
     r = client.post("/agent", json={"text": "下一首", "session_id": "s-t22"})
     assert r.status_code == 200
-    assert fake_ha.scripts_called() == ["music_next"]
+    assert [c[0] for c in fake_ha.script_calls] == ["music_execute_v1"]
+    assert "next" in fake_ha.script_calls[-1][1].get("ma_command", "")

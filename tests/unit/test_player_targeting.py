@@ -1,8 +1,8 @@
-"""T09 / T22 —— 默认播放器离线时不擅自切换（IMP-03b 已修复，原 xfail 翻绿）。
+"""T09 / T22 —— 默认播放器离线时不擅自切换（IMP-03b 已修复）+ 控制目标锁定。
 
 契约（IMP-03b）：pick_player 只解析默认绑定目标（squeezebox-touch）；
 离线时如实返回其不可用状态，绝不静默改投其他播放器。
-读取、显示、写入使用同一台绑定播放器。
+读取、显示、写入使用同一台绑定播放器（控制核心路由亦同）。
 """
 from __future__ import annotations
 
@@ -48,15 +48,14 @@ def test_t09_t22_default_player_offline__no_silent_fallback():
     assert "cast" not in chosen.get("player_id", "")
 
 
-def test_t22_commands_go_only_to_bound_player(vg=None):
-    """控制动作的目标脚本集合固定——不存在第二台播放器的调用路径。"""
+def test_t22_reads_and_writes_target_bound_player():
+    """锁定：多次解析的目标都是绑定播放器（不因轮询/换通道漂移）。"""
     mac = _make([
         {"player_id": "sq-1", "name": "Squeezebox Touch", "available": False,
          "type": "squeezebox"},
         {"player_id": "cast-1", "name": "study-cast", "available": True,
          "type": "cast"},
     ])
-    # MAClient 无写方法（D13）；此处锁定读取目标也只指向绑定播放器
     for _ in range(3):
         p = mac.pick_player()
         assert p.get("player_id") == "sq-1"

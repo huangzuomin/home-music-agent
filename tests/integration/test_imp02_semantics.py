@@ -44,14 +44,21 @@ def test_unmute_restores_previous_volume_after_mute(vg, monkeypatch, tmp_path):
 
     r1 = client.post("/command", json={"text": "静音"})
     assert r1.json()["intent"] == "music_mute"
-    assert fake_ha.scripts_called()[-1] == "music_volume_set"
-    assert fake_ha.script_calls[-1][1]["level"] == 0
+    # IMP-03c：写动作经 music_execute_v1 短执行脚本（参数在 ma_args_json 里）
+    def last_level():
+        import json as _json
+        name, var = fake_ha.script_calls[-1]
+        assert name == "music_execute_v1", name
+        return _json.loads(var["ma_args_json"])["volume_level"]
+
+    r1 = client.post("/command", json={"text": "静音"})
+    assert r1.json()["intent"] == "music_mute"
+    assert last_level() == 0
 
     r2 = client.post("/command", json={"text": "取消静音"})
     body = r2.json()
     assert body["intent"] == "music_unmute"
-    assert fake_ha.scripts_called()[-1] == "music_volume_set"
-    assert fake_ha.script_calls[-1][1]["level"] == 88, (
+    assert last_level() == 88, (
         "取消静音应恢复静音前的 88（FakeMA 提供 volume_level=88）")
     assert body.get("unmute_known") is True
 
@@ -66,14 +73,16 @@ def test_unmute_without_memory_uses_default_and_says_so(vg):
     assert "默认" in body.get("say", ""), "应如实说明用的是默认音量"
 
 
-def test_stop_uses_acceptance_phrasing_and_marks_unconfirmed(vg):
-    """停止的受理 ≠ 完成：播报不再宣称「已停止播放」，响应标记未确认。"""
+def test_stop_uses_acceptance_phrasing_and_confirms_on_receipt(vg):
+    """IMP-03c 契约：停止经控制核心执行，回执成功即 player_confirmed=True
+    （确定性单写动作，收据级确认；快照级确认 IMP-08 接入）；
+    播报使用受理措辞「正在停止播放」，不宣称已完成。"""
     vg_app, client, fake_ha, _, _ = vg
     r = client.post("/command", json={"text": "停止播放"})
     body = r.json()
-    assert body["player_confirmed"] is False, (
-        "HTTP 受理不等于播放器确认（IMP-03 才引入真实确认）")
+    assert body["player_confirmed"] is True
     assert "正在停止" in body.get("say", ""), "应使用受理措辞，不宣称已完成"
+    assert body.get("command_id"), "应回传 command_id 便于对账"
 
 
 def test_constraint_reply_does_not_promise_future_adjustment(

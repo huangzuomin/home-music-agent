@@ -51,6 +51,11 @@ import tts as tts_mod
 import agent as agent_mod
 import context as context_mod
 import session as session_mod
+import contracts
+import ha_executor as ha_executor_mod
+import coordinator as coordinator_mod
+import storage as storage_mod
+import devices as devices_mod
 
 HA_BASE = os.environ.get("HA_BASE", "http://127.0.0.1:8123")
 ENV_PATH = pathlib.Path(os.environ.get("ENV_PATH", "/opt/home-music-agent/.env"))
@@ -67,6 +72,8 @@ TTS_ENABLED = os.environ.get("TTS_ENABLED", "true").lower() in ("1", "true", "ye
 TTS_VOICE = os.environ.get("TTS_VOICE", tts_mod.DEFAULT_VOICE)
 # v0.3：/agent（Session 化 Agent）。false 时 /agent 自动降级为旧 /command 逻辑。
 AGENT_SESSION_ENABLED = os.environ.get("AGENT_SESSION_ENABLED", "true").lower() in ("1", "true", "yes")
+# IMP-03c：控制核心开关。false 时回到 IMP-02 行为（直接 HA script，安全默认保留）。
+CONTROL_CORE_V1 = os.environ.get("CONTROL_CORE_V1", "true").lower() in ("1", "true", "yes")
 CONTEXT_TRACKS = int(os.environ.get("CONTEXT_TRACKS", "20"))
 CONVERSATION_TURNS = int(os.environ.get("CONVERSATION_TURNS", "10"))
 
@@ -193,6 +200,36 @@ ha = HAClient()
 _sessions: session_mod.SessionStore | None = None
 _ma: context_mod.MAClient | None = None
 _history: context_mod.TrackHistory | None = None
+_control_store: storage_mod.ControlStore | None = None
+_coordinator: coordinator_mod.CommandCoordinator | None = None
+
+
+def get_control_store() -> storage_mod.ControlStore:
+    global _control_store
+    if _control_store is None:
+        _control_store = storage_mod.ControlStore()
+    return _control_store
+
+
+def get_coordinator() -> coordinator_mod.CommandCoordinator:
+    global _coordinator
+    if _coordinator is None:
+        executor = ha_executor_mod.HAExecutor(
+            ha, queue_resolver=lambda pid: get_ma().queue_state(pid))
+        _coordinator = coordinator_mod.CommandCoordinator(
+            store=get_control_store(), executor=executor)
+    return _coordinator
+
+
+# 网关脚本名 → 核心动作（控制核心可路由的确定性动作）
+SCRIPT_TO_ACTION: dict[str, str] = {
+    "music_next": contracts.ACTION_NEXT,
+    "music_previous": contracts.ACTION_PREVIOUS,
+    "music_pause": contracts.ACTION_PAUSE,
+    "music_resume": contracts.ACTION_RESUME,
+    "music_stop": contracts.ACTION_STOP,
+    "music_volume_set": contracts.ACTION_VOLUME_SET,
+}
 
 
 def get_sessions() -> session_mod.SessionStore:
@@ -574,6 +611,8 @@ class CommandIn(BaseModel):
     mode: str = "auto"          # auto | rules | agent
     want_say: bool = True       # 是否附带播报语
     speak: bool = False         # 是否顺带合成音频（返回 base64）
+    request_id: str = ""        # 幂等键（客户端重试用同一 id）
+    device_id: str = "local"
 
 
 class TTSIn(BaseModel):
@@ -642,9 +681,28 @@ def command(body: CommandIn) -> dict[str, Any]:
             result["say"] = parsed["say"]
 
     if parsed.get("script") and not body.dry_run:
-        result.update(ha.call_script(parsed["script"], parsed.get("variables")))
-        # IMP-02（T09/G03）：HTTP 受理 ≠ 播放器确认；真实确认由 IMP-03 引入。
-        result["player_confirmed"] = False
+        action = (SCRIPT_TO_ACTION.get(parsed["script"])
+                  if CONTROL_CORE_V1 else None)
+        if action:
+            # IMP-03c：确定性动作进控制核心（幂等/代际/STOP 屏障）
+            cres = get_coordinator().submit(contracts.CommandRequest(
+                device_id=(body.device_id or "local"),
+                request_id=(body.request_id or uuid.uuid4().hex),
+                action=action, args=dict(parsed.get("variables") or {}),
+                player_id="", source="voice"))
+            if cres.get("status") == "error":
+                result["ok"] = False
+                result["error"] = cres.get("error")
+                result["player_confirmed"] = False
+            else:
+                result["ok"] = True
+                result["command_id"] = cres.get("command_id")
+                result["player_confirmed"] = bool(
+                    cres.get("player_confirmed", False))
+        else:
+            result.update(ha.call_script(parsed["script"],
+                                         parsed.get("variables")))
+            result["player_confirmed"] = False
     elif parsed.get("script"):
         result["ok"] = True
 
@@ -688,6 +746,8 @@ class AgentIn(BaseModel):
     dry_run: bool = False
     want_say: bool = True         # reply 是否随行（客户端决定播不播）
     speak: bool = False           # 顺带合成音频（base64）
+    request_id: str = ""          # 幂等键（空则每次生成新命令）
+    device_id: str = "local"
 
 
 def _agent_fallback_command(body: AgentIn) -> dict[str, Any]:
@@ -855,10 +915,27 @@ def agent_endpoint(body: AgentIn) -> dict[str, Any]:
             and not needs_agent(text, rule_res)):
         if rule_res.get("intent") in ("music_mute", "music_unmute")                 and not body.dry_run:
             _apply_mute_semantics(rule_res)
+        action = (SCRIPT_TO_ACTION.get(rule_res["script"])
+                  if CONTROL_CORE_V1 else None)
         if not body.dry_run:
-            result.update(ha.call_script(rule_res["script"],
-                                         rule_res.get("variables")))
-            result["player_confirmed"] = False   # 受理 ≠ 播放器确认
+            if action:
+                cres = get_coordinator().submit(contracts.CommandRequest(
+                    device_id=(body.device_id or "local"),
+                    request_id=(body.request_id or uuid.uuid4().hex),
+                    action=action, args=dict(rule_res.get("variables") or {}),
+                    player_id="", source="voice"))
+                if cres.get("status") == "error":
+                    result["ok"] = False
+                    result["error"] = cres.get("error")
+                else:
+                    result["ok"] = True
+                    result["command_id"] = cres.get("command_id")
+                result["player_confirmed"] = bool(
+                    cres.get("player_confirmed", False))
+            else:
+                result.update(ha.call_script(rule_res["script"],
+                                             rule_res.get("variables")))
+                result["player_confirmed"] = False   # 受理 ≠ 播放器确认
         else:
             result["ok"] = True
         if rule_res.get("intent") == "music_unmute":
