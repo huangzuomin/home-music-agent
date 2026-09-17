@@ -58,6 +58,9 @@ import storage as storage_mod
 import devices as devices_mod
 import auth as auth_mod
 import health as health_mod
+import playback_state as playback_state_mod
+import scene_catalog as scene_catalog_mod
+import api_v1 as api_v1_mod
 import scene_catalog as scene_catalog_mod
 
 HA_BASE = os.environ.get("HA_BASE", "http://127.0.0.1:8123")
@@ -214,6 +217,16 @@ _ma: context_mod.MAClient | None = None
 _history: context_mod.TrackHistory | None = None
 _control_store: storage_mod.ControlStore | None = None
 _coordinator: coordinator_mod.CommandCoordinator | None = None
+_device_auth: auth_mod.DeviceAuth | None = None
+_health_checker: health_mod.HealthChecker | None = None
+
+
+def get_device_auth() -> auth_mod.DeviceAuth:
+    global _device_auth
+    if _device_auth is None:
+        _device_auth = auth_mod.DeviceAuth(store=get_control_store())
+    return _device_auth
+
 
 
 def get_control_store() -> storage_mod.ControlStore:
@@ -244,15 +257,48 @@ SCRIPT_TO_ACTION: dict[str, str] = {
 }
 
 
-_device_auth: auth_mod.DeviceAuth | None = None
+# ---- IMP-07：/api/v1 依赖装配 ----
+class _MAReaderAdapter:
+    """把 context.MAClient 适配成 playback_state 需要的读取接口。"""
+
+    def __init__(self, mac) -> None:
+        self.mac = mac
+
+    def get_player(self, player_id: str):
+        for p in (self.mac.api("players/all") or []):
+            if p.get("player_id") == player_id:
+                return p
+        return None
+
+    def get_active_queue(self, player_id: str):
+        return self.mac.queue_state(player_id)
+
+    def queue_items(self, queue_id: str, limit: int = 10):
+        return self.mac.queue_items(queue_id, limit)
+
+
+def get_snapshot() -> dict[str, Any]:
+    reader = _MAReaderAdapter(get_ma())
+    binding = devices_mod.get_target_player(get_control_store())
+    return playback_state_mod.build_snapshot(reader, binding["player_id"])
+
+
+api_v1_mod.init_deps(
+    coordinator=get_coordinator,
+    store=get_control_store,
+    auth=get_device_auth(),
+    device_auth_required=DEVICE_AUTH_REQUIRED,
+    snapshot=get_snapshot,
+    scenes=lambda: scene_catalog_mod.catalog_report(
+        scene_catalog_mod.load_scenes(SCENES_FILE)),
+    check_origin=lambda origin: auth_mod.check_origin(origin,
+                                                      ALLOWED_ORIGINS),
+    search=lambda q: get_ma().search(q, limit=6),
+)
+app.include_router(api_v1_mod.router)
+
+
 _health_checker: health_mod.HealthChecker | None = None
-
-
-def get_device_auth() -> auth_mod.DeviceAuth:
-    global _device_auth
-    if _device_auth is None:
-        _device_auth = auth_mod.DeviceAuth(store=get_control_store())
-    return _device_auth
 
 
 def get_health_checker() -> health_mod.HealthChecker:

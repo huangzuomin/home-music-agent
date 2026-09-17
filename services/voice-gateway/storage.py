@@ -229,6 +229,37 @@ class ControlStore:
             " WHERE device_id = ?", (device_id,)).fetchone()
         return dict(row) if row else None
 
+    def set_device_token(self, device_id: str, token_hash: str) -> None:
+        """写入设备令牌哈希（明文 token 不落库）。"""
+        self.connect().execute(
+            "UPDATE devices SET token_hash = ? WHERE device_id = ?",
+            (token_hash, device_id))
+        self.connect().commit()
+
+    def revoke_device(self, device_id: str) -> bool:
+        cur = self.connect().execute(
+            "UPDATE devices SET token_hash = '' WHERE device_id = ?",
+            (device_id,))
+        self.connect().commit()
+        return cur.rowcount > 0
+
+    def get_device(self, device_id: str) -> dict[str, Any] | None:
+        row = self.connect().execute(
+            "SELECT device_id, name, kind, token_hash, revoked, created_at"
+            " FROM devices WHERE device_id = ?", (device_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_command_by_id(self, command_id: str) -> dict[str, Any] | None:
+        row = self.connect().execute(
+            "SELECT * FROM commands WHERE command_id = ?",
+            (command_id,)).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        d["args"] = json.loads(d.pop("args_json") or "{}")
+        d["result"] = json.loads(d.pop("result_json") or "{}")
+        return d
+
     def set_binding(self, scope: str, player_id: str,
                     player_name: str = "") -> None:
         self.connect().execute(

@@ -2,22 +2,190 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#141210">
 <title>Home Music Agent</title>
-<!-- IMP-07 骨架：当前仅为占位 App Shell。完整 PWA 按 Plan IMP-07 实施
-     （须待视觉方向确认：Editorial / Ambient / Music-first）。 -->
+<link rel="manifest" href="manifest.webmanifest">
+<!--
+  IMP-07 PWA（Music-first 层级 + Editorial 排版：衬线大标题、大留白、
+  封面主导、控制紧凑）。离线仅缓存 App Shell；断线不清命令、重连先拉快照。
+-->
 <style>
-  body { font-family: system-ui, sans-serif; background: #111; color: #eee;
-         display: flex; align-items: center; justify-content: center;
-         min-height: 100vh; margin: 0; }
-  .card { text-align: center; }
-  .state { font-size: 13px; opacity: .6; }
+  :root{
+    --bg:#141210; --panel:#1d1a17; --ink:#ece7df; --ink-dim:#a89f92;
+    --accent:#c9a86a; --line:#2b2723; --err:#c96a6a; --ok:#8fbf8f;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:16px/1.6 Georgia,"Songti SC",serif;
+       padding:max(12px,env(safe-area-inset-top)) 16px 32px}
+  h1{font-size:22px;font-weight:600;letter-spacing:.04em;margin:8px 0 2px}
+  .wrap{max-width:520px;margin:0 auto}
+  .state{font-size:12px;color:var(--ink-dim);letter-spacing:.06em}
+  .panel{background:var(--panel);border:1px solid var(--line);
+         border-radius:10px;padding:16px;margin:12px 0}
+  .cover{width:100%;aspect-ratio:1;border-radius:8px;background:#26221e;
+         display:flex;align-items:center;justify-content:center;
+         font-size:56px;color:#4a423a;margin-bottom:12px}
+  .title{font-size:26px;line-height:1.25;min-height:32px}
+  .artist{color:var(--ink-dim);margin-bottom:10px}
+  button{font:inherit;color:var(--ink);background:#26221e;
+         border:1px solid var(--line);border-radius:8px;
+         padding:10px 14px;cursor:pointer;min-height:44px;min-width:44px}
+  button:active{background:#332d27}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  .row button{flex:1}
+  input,select{font:inherit;width:100%;padding:10px;border-radius:8px;
+         border:1px solid var(--line);background:#26221e;color:var(--ink);
+         margin:6px 0}
+  .err{color:var(--err);font-size:13px;min-height:18px}
+  .dim{color:var(--ink-dim);font-size:13px}
+  .vol{width:100%;accent-color:var(--accent)}
+  .hidden{display:none}
+  ul{list-style:none;padding:0;margin:6px 0}
+  li{padding:8px 4px;border-bottom:1px solid var(--line);
+     display:flex;justify-content:space-between;gap:8px;align-items:center}
+  .badge{font-size:11px;border:1px solid var(--line);border-radius:6px;
+         padding:2px 6px;color:var(--ink-dim)}
 </style>
 </head>
 <body>
-  <div class="card">
-    <h1>Home Music Agent</h1>
-    <p class="state">PWA 骨架 — 完整界面见 Plan IMP-07</p>
+<div class="wrap">
+  <div class="state" id="conn">连接中…</div>
+  <h1>Home Music Agent</h1>
+
+  <!-- 配对 -->
+  <div class="panel" id="pairView">
+    <p>首次使用：在网关管理入口生成一次性配对码。</p>
+    <input id="pairCode" placeholder="配对码（XXXX-XXXX）">
+    <input id="pairName" placeholder="设备名称（如 手机A）">
+    <button id="pairBtn">配对</button>
+    <div class="err" id="pairErr"></div>
   </div>
+
+  <!-- 主屏 -->
+  <div id="mainView" class="hidden">
+    <div class="panel">
+      <div class="cover" id="cover">♪</div>
+      <div class="title" id="npTitle">—</div>
+      <div class="artist" id="npArtist"></div>
+      <div class="row">
+        <button id="bPrev">⏮</button>
+        <button id="bPause">⏸</button>
+        <button id="bResume">▶</button>
+        <button id="bNext">⏭</button>
+        <button id="bStop">⏹</button>
+      </div>
+      <input type="range" class="vol" id="vol" min="0" max="100" value="50">
+      <div class="dim">音量 <span id="volVal">—</span></div>
+    </div>
+
+    <div class="panel">
+      <div class="state">场景</div>
+      <div class="row" id="sceneRow"></div>
+      <div class="err" id="sceneErr"></div>
+    </div>
+
+    <div class="panel">
+      <div class="state">搜索</div>
+      <input id="q" placeholder="歌名 / 歌手">
+      <button id="qBtn">搜索</button>
+      <ul id="results"></ul>
+    </div>
+
+    <div class="panel">
+      <div class="state">这条播放得怎么样？</div>
+      <div class="row">
+        <button id="bLike">👍 不错</button>
+        <button id="bDislike">👎 别放了</button>
+      </div>
+    </div>
+  </div>
+  <div class="err" id="err"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const API = location.origin.replace(/:8400$/, '') + '/gw/api/v1';
+const H = () => ({'X-Device-ID': localStorage.device_id || '',
+                  'X-Device-Token': localStorage.device_token || '',
+                  'Content-Type': 'application/json'});
+
+async function api(method, path, body) {
+  const r = await fetch(API + path, {method: method, headers: H(),
+      body: body ? JSON.stringify(body) : undefined});
+  if (r.status === 401) { localStorage.removeItem('device_id');
+    localStorage.removeItem('device_token'); showPair(); throw new Error('需要重新配对'); }
+  const d = await r.json();
+  return {ok: r.ok, status: r.status, data: d};
+}
+
+let busy = false;
+async function refresh() {
+  try {
+    const {data} = await api('GET', '/snapshot');
+    $('npTitle').textContent = data.current_item.title || '—';
+    $('npArtist').textContent = data.current_item.artist || '';
+    $('vol').value = data.volume_level ?? 50;
+    $('volVal').textContent = Math.round(data.volume_level ?? 0);
+    $('conn').textContent = data.playback_state === 'offline'
+      ? '⚠ 绑定音箱离线' : '已连接：' + (data.player_name || '');
+  } catch (e) { $('conn').textContent = '状态获取失败'; }
+}
+
+async function cmd(action, args) {
+  if (busy) return;
+  busy = true;
+  try {
+    const request_id = crypto.randomUUID();
+    const {data} = await api('POST', '/commands',
+      {request_id, action, args: args || {}});
+    if (data.status === 'error') $('err').textContent = data.error || '执行失败';
+  } catch (e) { $('err').textContent = String(e); }
+  finally { busy = false; setTimeout(refresh, 400); }
+}
+
+$('bPrev').onclick  = () => cmd('previous');
+$('bPause').onclick = () => cmd('pause');
+$('bResume').onclick= () => cmd('resume');
+$('bNext').onclick  = () => cmd('next');
+$('bStop').onclick  = () => cmd('stop');
+$('vol').onchange   = e => cmd('volume_set', {level: +e.target.value});
+$('bLike').onclick  = () => feedback('track_positive');
+$('bDislike').onclick = () => feedback('track_negative');
+
+async function feedback(signal) {
+  try {
+    await api('POST', '/feedback',
+      {event_id: crypto.randomUUID(), signal: signal,
+       target: {title: $('npTitle').textContent}});
+    $('err').textContent = '已记录';
+  } catch (e) { $('err').textContent = String(e); }
+}
+
+$('pairBtn').onclick = async () => {
+  const r = await fetch(API + '/pair', {method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({code: $('pairCode').value,
+                          device_name: $('pairName').value || 'PWA'})});
+  if (!r.ok) { $('pairErr').textContent = '配对码无效或已过期'; return; }
+  const d = await r.json();
+  localStorage.device_id = d.device_id;
+  localStorage.device_token = d.token;
+  location.reload();
+};
+
+function showPair() {
+  $('pairView').classList.remove('hidden');
+  $('mainView').classList.add('hidden');
+}
+function showMain() {
+  $('pairView').classList.add('hidden');
+  $('mainView').classList.remove('hidden');
+  refresh(); setInterval(refresh, 3000);
+}
+
+if (localStorage.device_id) showMain(); else showPair();
+</script>
 </body>
 </html>

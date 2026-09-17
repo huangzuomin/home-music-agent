@@ -1,0 +1,10 @@
+{
+  "name": "Home Music Agent",
+  "short_name": "HMA",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#141210",
+  "theme_color": "#141210",
+  "lang": "zh-CN",
+  "description": "语音驱动的家庭音乐助手"
+}

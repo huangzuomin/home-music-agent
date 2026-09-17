@@ -41,6 +41,34 @@ class HAExecutor:
     def execute(self, action: str, args: dict[str, Any] | None,
                 player_id: str, command_id: str) -> dict[str, Any]:
         args = dict(args or {})
+        if action == "play_now":
+            # 立即播放：用 uri 替换队列（MA play_media 语义）
+            uri = str(args.get("uri") or "")
+            if not uri:
+                rec = {"executed": False, "error": "NO_MEDIA",
+                       "ma_command": None, "ma_args": {}}
+                self.executions.append(rec)
+                return rec
+            queue_id = str(args.get("queue_id") or "")
+            if not queue_id and self.queue_resolver:
+                q = self.queue_resolver(player_id) or {}
+                queue_id = str(q.get("queue_id") or "")
+            if not queue_id:
+                rec = {"executed": False, "error": "NO_QUEUE",
+                       "ma_command": None, "ma_args": {}}
+                self.executions.append(rec)
+                return rec
+            ma_command = "player_queues/play_media"
+            ma_args = {"queue_id": queue_id, "media": uri}
+            receipt = self.ha.call_script(SCRIPT_NAME, {
+                "ma_command": ma_command,
+                "ma_args_json": json.dumps(ma_args, ensure_ascii=False),
+                "command_id": command_id})
+            rec = {"executed": bool(receipt.get("ok")),
+                   "ma_command": ma_command, "ma_args": ma_args,
+                   "receipt": receipt}
+            self.executions.append(rec)
+            return rec
         if action in QUEUE_COMMANDS:
             queue_id = str(args.get("queue_id") or "")
             if not queue_id and self.queue_resolver:
