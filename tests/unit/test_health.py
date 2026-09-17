@@ -66,7 +66,7 @@ def test_readiness_nas_mismatch_blocks_ready(patch_nas):
 def test_readiness_stt_degraded_does_not_block_ready(patch_nas):
     """STT 属非关键组件：故障不拉低 ready（基本播放控制不受影响）。"""
     c = make_checker()
-    patch_nas({"ok": True})
+    patch_nas({"ok": True, "source": "nas:/music"})
     rep = c.readiness()
     assert rep["ready"] is True
     assert "stt_ready" in rep["non_critical"]

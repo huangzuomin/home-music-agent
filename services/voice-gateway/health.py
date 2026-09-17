@@ -125,8 +125,11 @@ class HealthChecker:
                                  self.nas_mount_point)
         checks["nas_mount"] = nas
 
-        # IMP-04：只有 db/HA/MA 是关键（NAS/播放器/STT 不阻塞基本控制）
-        critical = ["db_writable", "ha_reachable", "ma_reachable"]
+        # A1 修正：NAS 未挂载时写入会落进宿主同名空目录（X08），
+        # 必须作为关键项阻塞 readiness；compose 已给 voice-gateway 加
+        # 只读 /mnt/music 挂载使 /proc/mounts 可见。
+        critical = ["db_writable", "ha_reachable", "ma_reachable",
+                    "nas_mount"]
         ready = all(checks[k].get("ok") for k in critical)
         return {"ready": ready, "checks": checks,
                 "non_critical": ["stt_ready", "target_player_online"]}

@@ -60,6 +60,8 @@ services:
       - ./data/sessions:/app/data/sessions
       # IMP-03a：控制核心 SQLite（命令/会话/授权），落在 VM 持久卷
       - ./data/control:/app/data/control
+      # IMP-04 A1：只读挂载 NAS 曲库，使 /proc/mounts 可见（readiness nas_mount 核验）
+      - /mnt/music:/mnt/music:ro
     environment:
       TZ: Asia/Shanghai
       HA_BASE: "http://127.0.0.1:8123"
