@@ -174,6 +174,13 @@ def build_profile(tracks: list[dict[str, Any]] | None = None,
                 pass
 
     # ---- ② 显式反馈（agent-sessions.jsonl）
+    # IMP-02（T12）：累计快照 patch 里携带全量 feedback 列表，逐 patch 累加
+    # 会重复计分。去重规则：优先按 event_id；旧反馈（无 event_id）按内容
+    # 指纹（signal+target+note+t）去重，仍无法唯一判定的标 legacy_uncertain，
+    # 不计入高置信偏好分。
+    seen_event: set[str] = set()
+    seen_legacy: set[str] = set()
+    legacy_uncertain = 0
     for rec in iter_jsonl(AGENT_SESSIONS):
         fbs = []
         if rec.get("op") == "create":
@@ -183,13 +190,30 @@ def build_profile(tracks: list[dict[str, Any]] | None = None,
         for fb in fbs:
             sig = str(fb.get("signal") or "")
             target = fb.get("target") or {}
+            note = str(fb.get("note") or "")
+            t_epoch = parse_iso(fb.get("t"))
+            event_id = str(fb.get("event_id") or "")
+            identity = json.dumps(
+                {"signal": sig, "target": target, "note": note},
+                ensure_ascii=False, sort_keys=True)
+            if event_id:
+                if event_id in seen_event:
+                    continue
+                seen_event.add(event_id)
+                seen_legacy.add(identity)
+            else:
+                fp = "legacy|" + identity + "|" + str(t_epoch)
+                if fp in seen_legacy or identity in seen_legacy:
+                    legacy_uncertain += 1
+                    continue
+                seen_legacy.add(fp)
+                seen_legacy.add(identity)
             artist = clean_artist(target.get("artist"))
             if (not artist) and target.get("uri") in by_uri:
                 arts = [clean_artist((a or {}).get("name"))
                         for a in ((by_uri.get(target["uri"]) or {})
                                   .get("artists") or [])]
                 artist = next((x for x in arts if x), "")
-            t_epoch = parse_iso(fb.get("t"))
             if sig == "artist_negative":
                 if artist:
                     artist_black.add(artist)
@@ -211,6 +235,7 @@ def build_profile(tracks: list[dict[str, Any]] | None = None,
     return {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)),
         "history_days": span_days,
+        "legacy_uncertain_feedback": legacy_uncertain,
         "signal_counts": dict(events),
         "artists": artists,
         "blacklist_artists": sorted(artist_black),

@@ -30,8 +30,8 @@ def fetcher(monkeypatch, tmp_path):
     return fake
 
 
-@pytest.mark.xfail(strict=True, reason="G01/T01：迟到的补库完成会抢播，修复在 IMP-02")
 def test_t01_backfill_completing_after_b_plays__must_not_steal(fetcher):
+    """IMP-02 已修复：完成通道只报告 asset_ready，不再触发播放。"""
     """用户点 A（A 转入补库）后改点 B；A 补库完成时不得把 B 换成 A。"""
     args = fetcher.make_args(QUERY_A, play=True)
     result = fetcher.ab.run(args)
@@ -43,10 +43,12 @@ def test_t01_backfill_completing_after_b_plays__must_not_steal(fetcher):
     # 契约：A 完成后**只入库**，当前正在播放的 B 不被抢换
     assert fetcher.plays == [], (
         "补库完成不应触发播放（当前抢播了 %r）" % fetcher.plays)
+    assert result.get("asset_ready") is True, "应报告资源就绪"
+    assert result.get("autoplay_blocked") is True, "应登记 autoplay 请求被阻断"
 
 
-@pytest.mark.xfail(strict=True, reason="G01/T02：停止后迟到的补库完成会让音乐复活，修复在 IMP-02")
 def test_t02_stop_then_backfill_completes__stays_stopped(fetcher):
+    """IMP-02 已修复：用户停止后，迟到的补库完成不让音乐复活。"""
     """用户停止播放后，迟到的补库完成不得让音乐复活。"""
     fetcher.stopped = True                    # 用户已停止（T02 前提）
     args = fetcher.make_args(QUERY_A, play=True)
@@ -57,8 +59,8 @@ def test_t02_stop_then_backfill_completes__stays_stopped(fetcher):
         "已停止后补库完成不应触发播放（实际播放了 %r）" % fetcher.plays)
 
 
-@pytest.mark.xfail(strict=True, reason="G01/T03：语音入口的「仅入库」请求仍带自动播放，修复在 IMP-02")
 def test_t03_fetch_tool_import_only__playback_untouched(fetcher):
+    """IMP-02 已修复：工具链的「仅入库」请求全程不触发播放。"""
     """通过真实工具链（music_fetch 计划 → run）验证「仅入库不改变播放」。
 
     当前 tools.plan 的 music_fetch 硬编码 play=True → 完成即播放。
@@ -66,7 +68,8 @@ def test_t03_fetch_tool_import_only__playback_untouched(fetcher):
     plan_tools = __import__("tools")
     plan = plan_tools.plan("music_fetch", {"query": QUERY_A})
 
-    args = fetcher.make_args(QUERY_A, play=bool(plan["variables"]["play"]))
+    args = fetcher.make_args(
+        QUERY_A, play=bool(plan["variables"].get("play", False)))
     result = fetcher.ab.run(args)
 
     assert result["ok"], result.get("reason")

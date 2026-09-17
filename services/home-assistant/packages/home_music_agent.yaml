@@ -47,7 +47,8 @@ rest_command:
 
   # ---------------------------------------------------------------- 按需补库
   # 打到 VM1 的 music-fetcher（:8300）。作业是异步的：这里只提交，返回 job_id。
-  # 下载完成后由 music-fetcher 回调本包的 script.music_play_uri 播放。
+  # IMP-02：补库完成只入库不播放（play 固定 false，前端传 play=true 也不透传）。
+  # 资源就绪后由用户在 PWA/语音里显式选择播放。
   music_backfill:
     url: "http://127.0.0.1:8300/backfill"
     method: POST
@@ -57,7 +58,7 @@ rest_command:
     #    非法 JSON（music-fetcher 会 422）。必须显式转成 JSON 的 true/false。
     payload: >-
       {"query": "{{ ma_query }}",
-       "play": {{ 'false' if (play | default(true) | string | lower) in ('false', 'no', '0', 'off', 'none') else 'true' }},
+       "play": false,
        "min_duration": {{ min_duration | default(60) }}}
 
   # 本地曲库随机列表（带响应）：空窗填充用。实测（2026-09-13）：

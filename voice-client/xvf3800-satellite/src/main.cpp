@@ -39,6 +39,12 @@ static void ledSet(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 static void ledState(SatState st) {
+    // IMP-02（T16）：无唤醒的 VAD 常驻是调试模式——空闲灯用琥珀色明示，
+    // 与正式的绿色（唤醒模式待命）区分，避免家人误以为已受唤醒保护。
+    if (st == ST_IDLE && !WAKE_ENABLED) {
+        ledSet(255, 120, 0);  // 琥珀：调试模式待命
+        return;
+    }
     switch (st) {
         case ST_IDLE:     ledSet(0, 40, 0);   break;  // 绿：待命
         case ST_CAPTURE:  ledSet(0, 0, 255);  break;  // 蓝：录音
@@ -477,6 +483,8 @@ void setup() {
     if (!WAKE_ENABLED) logf("[wake] 已按配置关闭，使用 VAD 直接触发");
     else if (!wake_ok) logf("[wake] 不可用，退回 VAD 直接触发模式");
 
+    if (!WAKE_ENABLED)
+        logf("[mode] ⚠️ 调试模式：无唤醒 VAD 常驻（房间内说话即采集上传）");
     logf("就绪。模式：%s", TRIGGER_VAD ? "VAD 自动断句（按钮可强制）" : "按钮按住说话");
     g_state = ST_IDLE;
     ledState(g_state);

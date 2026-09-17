@@ -26,7 +26,9 @@ def test_mute_word_does_not_hit_when_describing_music():
     assert r.get("intent") != "volume_set"
 
 
-def test_unmute_maps_to_configured_level():
-    """当前行为：取消静音恢复到固定 UNMUTE_LEVEL（缺陷本身见 T17 的 xfail）。"""
+def test_unmute_is_distinct_intent_without_fixed_level():
+    """IMP-02 契约：取消静音是独立意图，level 由执行段按静音前音量解析。"""
     r = vg_app.parse_volume_command("取消静音")
-    assert r["variables"]["level"] == vg_app.UNMUTE_LEVEL
+    assert r["intent"] == "music_unmute"
+    assert r["script"] == "music_volume_set"
+    assert "level" not in r["variables"]

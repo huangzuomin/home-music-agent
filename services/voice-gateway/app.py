@@ -271,13 +271,29 @@ VOLUME_SPOKEN = (("一半", 50), ("最大", 100), ("最小", 0), ("全开", 100)
 #   ① lookbehind：(?<![安平冷]) —— 挡住「安静/平静/冷静」
 #   ② lookahead：(?![音乐]) —— 挡住「静音音乐」「静音音」这类把「静音」当形容词的
 #      连写（「把音乐静音」仍然命中，因为静音在句尾）
-MUTE_RE = re.compile(r"(?<![安平冷])(静音|闭麦|别出声|闭嘴|消音|mute)(?![音乐])")
+# IMP-02（T15）：「闭麦」是输入设备控制，不再混入音乐静音正则。
+MUTE_RE = re.compile(r"(?<![安平冷])(静音|别出声|闭嘴|消音|mute)(?![音乐])")
 UNMUTE_RE = re.compile(
-    r"(取消静音|解除静音|取消闭麦|恢复音量|恢复声音|声音开回来|打开声音|开声|unmute)")
+    r"(取消静音|解除静音|恢复音量|恢复声音|声音开回来|打开声音|开声|unmute)")
+# 闭麦/麦克风开关：显式不支持（MIC_CONTROL_UNSUPPORTED），提示用设备关闭键。
+MIC_RE = re.compile(r"(闭麦|取消闭麦|麦克风\s*(开|关|闭|静音))")
 
 # 「取消静音」时恢复到多少（MA 的 mute_control 是 none，只能用音量 0 代替静音，
 #  所以必须记住一个恢复值）。可用环境变量 UNMUTE_LEVEL 覆盖。
+# IMP-02（T17）：优先恢复该播放器静音前的真实音量（执行静音时记录在
+# _pre_mute_volume）；无已知值时用该保守默认，并如实告知「是默认值」。
 UNMUTE_LEVEL = int(os.environ.get("UNMUTE_LEVEL", "40"))
+_pre_mute_volume: dict[str, float] = {}
+
+
+def resolve_unmute_level(stored) -> tuple[int, bool]:
+    """取消静音的目标音量：有静音前记录 → 恢复它；否则保守默认。
+
+    返回 (level, is_known_restore)。
+    """
+    if stored is not None and float(stored) > 0:
+        return int(round(float(stored))), True
+    return UNMUTE_LEVEL, False
 
 _CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
               "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
@@ -306,15 +322,57 @@ def _cn_num(s: str) -> int | None:
     return total + section
 
 
+# 静音/取消静音的执行语义（IMP-02，T17）：
+#   music_mute   → 先记录该播放器当前音量（>0 时），再下调到 0；
+#   music_unmute → 恢复记录中的静音前音量；无记录时用保守默认并如实说明。
+_pre_mute_volume: dict[str, float] = {}
+
+
+def _apply_mute_semantics(parsed: dict[str, Any]) -> None:
+    """为 music_mute / music_unmute 计划解析最终 level（就地修改 variables）。
+
+    MA 的 mute_control 为 none，静音以「音量 0」实现，因此必须记住静音前的
+    音量。查不到播放器或音量时按「无已知值」处理，恢复使用保守默认。
+    """
+    try:
+        player = get_ma().pick_player()
+    except Exception:
+        player = {}
+    pid = (player or {}).get("player_id") or "default"
+    parsed.setdefault("variables", {})
+    if parsed["intent"] == "music_mute":
+        vol = (player or {}).get("volume_level")
+        if vol is not None and float(vol) > 0:
+            _pre_mute_volume[pid] = float(vol)
+        parsed["variables"]["level"] = 0
+        return
+    stored = _pre_mute_volume.pop(pid, None)
+    level, known = resolve_unmute_level(stored)
+    parsed["variables"]["level"] = level
+    parsed["unmute_known"] = known
+    if not known:
+        parsed["say"] = ("已恢复到默认音量 %d（没找到静音前的音量记录）"
+                         % UNMUTE_LEVEL)
+
+
 def parse_volume_command(text: str) -> dict[str, Any] | None:
     """识别「绝对音量 / 静音 / 取消静音」。不是这类说法就返回 None。"""
     t = (text or "").strip()
     if not t:
         return None
+    if MIC_RE.search(t):
+        # IMP-02（T15）：闭麦是输入设备控制；网关无可信麦克风控制能力时
+        # 显式返回 MIC_CONTROL_UNSUPPORTED，绝不能把音乐调成 0 冒充已闭麦。
+        return {"intent": "mic_control_unsupported", "script": None,
+                "variables": {},
+                "say": "麦克风开关请使用设备上的关闭键，语音这边控制不了"}
     if UNMUTE_RE.search(t):
-        return _volume_plan(UNMUTE_LEVEL, "音量已恢复")
+        # IMP-02（T17）：level 由执行段按「静音前音量」解析，无记录用保守默认。
+        return {"intent": "music_unmute", "script": "music_volume_set",
+                "variables": {}, "say": "音量已恢复"}
     if MUTE_RE.search(t):
-        return _volume_plan(0, "已静音")
+        return {"intent": "music_mute", "script": "music_volume_set",
+                "variables": {"level": 0}, "say": "已静音"}
     # 「音量开到一半」「声音最大」这类口语量词（必须有音量词，否则「最大」会误伤）
     if VOLUME_WORD and re.search(VOLUME_WORD, t):
         for word, lvl in VOLUME_SPOKEN:
@@ -355,15 +413,16 @@ CONTEXT_REF = re.compile(
 
 
 # 规则路径的播报语（Phase 5 TTS 用；无需过 LLM，1ms 内返回）
+# IMP-02：HTTP 受理 ≠ 播放器确认，停止/暂停改用受理措辞。
 RULE_SAY: dict[str, str] = {
     "volume_up": "音量已调大",
     "volume_down": "音量已调小",
     "next": "下一首",
     "previous": "上一首",
-    "pause": "已暂停",
+    "pause": "好的，正在暂停播放",
     "resume": "继续播放",
     "play_pause": "好的",
-    "stop": "已停止播放",
+    "stop": "好的，正在停止播放",
 }
 
 
@@ -448,11 +507,13 @@ AGENT_SYSTEM_PROMPT = (
     "4. 暂停/继续/上下首/停止 → music_transport。\n"
     "5. 音量的两种说法要分清：只说「大声点/小声点/太吵了」→ "
     "music_transport(volume_up / volume_down)；**报了具体数字**"
-    "（「音量调到30」「声音开到一半」「音量40」「静音」「闭麦」）→ "
+    "（「音量调到30」「声音开到一半」「音量40」「静音」）→ "
     "music_transport(action=\"volume_set\", level=数字)，数字即目标音量 0-100"
     "（静音=0，「一半」≈50）。绝对音量绝不能用 volume_down 代替。\n"
     "6. 询问当前播放内容 → music_context。\n"
-    "7. 若完全不相关（例如闲聊、问天气），不要调用任何工具。"
+    "7. 若完全不相关（例如闲聊、问天气），不要调用任何工具。\n"
+    "8. 用户说「闭麦/关麦克风/取消闭麦」是**输入设备控制**，不是音乐指令："
+    "不要调用任何音乐工具（该能力未接入，由设备按键处理）。"
 )
 
 
@@ -574,8 +635,16 @@ def command(body: CommandIn) -> dict[str, Any]:
     result: dict[str, Any] = {"text": text, "path": path, **parsed,
                               "dry_run": body.dry_run}
 
+    if parsed.get("intent") in ("music_mute", "music_unmute") and not body.dry_run:
+        _apply_mute_semantics(parsed)
+        result["unmute_known"] = parsed.get("unmute_known")
+        if parsed.get("say"):
+            result["say"] = parsed["say"]
+
     if parsed.get("script") and not body.dry_run:
         result.update(ha.call_script(parsed["script"], parsed.get("variables")))
+        # IMP-02（T09/G03）：HTTP 受理 ≠ 播放器确认；真实确认由 IMP-03 引入。
+        result["player_confirmed"] = False
     elif parsed.get("script"):
         result["ok"] = True
 
@@ -771,14 +840,33 @@ def agent_endpoint(body: AgentIn) -> dict[str, Any]:
     #      直接把整句当搜索词命中率极低，必须交给 LLM 改写。
     #      ⚠️ 2026-09-13 验收实测：漏了 ② 时 Case1 被降级成 play_query 走快路径。
     rule_res = parse_rules(text)
+    if rule_res.get("intent") == "mic_control_unsupported":
+        # IMP-02（T15）：闭麦不支持要如实说，不能静默，更不能动音乐音量。
+        result.update({"intent": "mic_control_unsupported", "path": "fast",
+                       "reply": rule_res["say"], "actions": []})
+        sessions.append_turn(sess, text, "mic_control_unsupported",
+                             rule_res["say"])
+        timings["total"] = round(time.time() - t0, 3)
+        result["timings"] = timings
+        _log({"endpoint": "/agent", "trace_id": trace_id, "text": text, **result})
+        return result
     if (rule_res.get("script") and rule_res["intent"] != "context"
             and not CONTEXT_REF.search(text)
             and not needs_agent(text, rule_res)):
+        if rule_res.get("intent") in ("music_mute", "music_unmute")                 and not body.dry_run:
+            _apply_mute_semantics(rule_res)
         if not body.dry_run:
             result.update(ha.call_script(rule_res["script"],
                                          rule_res.get("variables")))
+            result["player_confirmed"] = False   # 受理 ≠ 播放器确认
         else:
             result["ok"] = True
+        if rule_res.get("intent") == "music_unmute":
+            # IMP-02（T17）：无静音前记录时必须告知「用的是默认音量」，
+            # 不能让「音量已恢复」冒充真实恢复。
+            result["unmute_known"] = rule_res.get("unmute_known", False)
+            if not rule_res.get("unmute_known", True):
+                result["reply"] = rule_res.get("say", "")
         # §9.1：动作本身就是回答，Fast Path 默认不给 TTS 文本。
         # 例外：点播的歌本地库没有 —— 这时会播在线试听并后台补库，不说明一句，
         #      用户只会觉得「怎么才一分钟就停了」。
@@ -844,8 +932,9 @@ def agent_endpoint(body: AgentIn) -> dict[str, Any]:
             #    任何工具」「（无工具调用）」这类**元说明**，播出来只会打扰用户。
             reply = ""
         else:
-            # 只更新了 Session 约束、没有动作 → 一句极简确认（§9.2）
-            reply = planned.get("reply_draft") or "好，后面按这个来"
+            # IMP-02：只更新了约束、没有任何播放动作时，不得暗示「后面已调整」
+            # ——约束要等 IMP-10 的策略层才有真实作用。如实说明尚未生效。
+            reply = planned.get("reply_draft") or "已记录，不过约束还没有应用到播放队列"
     else:
         plan = action["plan"]
         kind = plan["kind"]
@@ -854,9 +943,12 @@ def agent_endpoint(body: AgentIn) -> dict[str, Any]:
         result["agent_args"] = action["args"]
 
         if kind == "script":
+            if plan.get("script") == "music_volume_set" and                     planned.get("intent") in ("music_mute", "music_unmute"):
+                _apply_mute_semantics(plan)
             if not body.dry_run:
                 result.update(ha.call_script(plan["script"],
                                              plan.get("variables")))
+                result["player_confirmed"] = False   # 受理 ≠ 播放器确认
             else:
                 result["ok"] = True
             result["actions"].append(plan["script"])

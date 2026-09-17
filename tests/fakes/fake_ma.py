@@ -15,9 +15,11 @@ class FakeMA:
         # ⚠️ 刻意不含 active / queue_id 字段（与部署版实测一致）
         self.players: list[dict] = [
             {"player_id": "sq-1", "name": "Squeezebox Touch",
-             "state": "playing", "available": True, "type": "squeezebox"},
+             "state": "playing", "available": True, "type": "squeezebox",
+             "volume_level": 88.0},
             {"player_id": "cast-1", "name": "study-cast",
-             "state": "idle", "available": True, "type": "cast"},
+             "state": "idle", "available": True, "type": "cast",
+             "volume_level": 50.0},
         ]
         # player_id -> 队列状态
         self.queues: dict[str, dict] = {
@@ -69,11 +71,28 @@ class FakeMA:
             return {"tracks": hits[:args.get("limit", 5)]}
         return None
 
+    def queue_state(self, player_id: str) -> dict:
+        return dict(self.queues.get(player_id) or {})
+
+    def queue_items(self, queue_id: str, limit: int = 10) -> list[dict]:
+        q = self.queues.get(queue_id) or {}
+        return (q.get("items_list") or [])[:limit]
+
     # ---- MAClient.search 兼容入口 ----
     def search(self, query: str, limit: int = 5) -> list[dict]:
         res = self.dispatch("music/search",
                             {"search_query": query, "limit": limit})
         return res.get("tracks", []) if isinstance(res, dict) else []
+
+    # ---- MAClient.pick_player 兼容入口 ----
+    def pick_player(self) -> dict:
+        for p in self.players:
+            if p.get("available") and "squeezebox" in str(p.get("type", "")).lower():
+                return p
+        for p in self.players:
+            if p.get("available"):
+                return p
+        return {}
 
     # ---- 场景注入 ----
     def set_player_offline(self, player_id: str) -> None:

@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # 仅安装测试依赖与被测服务的运行依赖；不注入任何 secret。
+      # 测试全部离线：不连家中 HA/MA/NAS，不触发下载或真实播放。
+      - name: Install deps
+        run: |
+          pip install -r requirements-dev.txt
+      - name: Run tests
+        run: python -m pytest tests/ -q

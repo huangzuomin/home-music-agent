@@ -37,12 +37,10 @@ def test_music_transport_next_maps_to_music_next():
     assert plan["script"] == "music_next"
 
 
-def test_music_fetch_current_behavior_autoplay_true():
-    """当前行为：music_fetch 请求补库时硬编码 play=True。
-
-    ⚠️ 这正是 G01/T01–T03 的触发层根源之一；IMP-02 阻断自动播放时
-    应把本用例与 auto_backfill 的完成回调一并收敛。
-    """
+def test_music_fetch_no_autoplay_and_honest_say():
+    """IMP-02 契约：补库请求不再携带自动播放；播报如实说明只入库。"""
     plan = tools_mod.plan("music_fetch", {"query": "陈奕迅 十年"})
     assert plan["script"] == "music_backfill"
-    assert plan["variables"]["play"] is True
+    assert plan["variables"].get("play") in (False, None), (
+        "自动播放已阻断（G01/T03）：music_fetch 不得请求播放")
+    assert "自动播放" in plan["say"] or "不会自动" in plan["say"]

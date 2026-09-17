@@ -4,13 +4,15 @@
     "name": "Squeezebox Touch",
     "state": "playing",
     "available": true,
-    "type": "squeezebox"
+    "type": "squeezebox",
+    "volume_level": 88.0
   },
   {
     "player_id": "cast-1",
     "name": "study-cast",
     "state": "idle",
     "available": true,
-    "type": "cast"
+    "type": "cast",
+    "volume_level": 50.0
   }
 ]

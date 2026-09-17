@@ -240,11 +240,13 @@ def plan(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         query = str(arguments.get("query") or "").strip()
         if not query:
             raise ToolError("music_fetch: query is required and must not be empty")
+        # IMP-02：补库完成只入库（asset_ready），不再自动播放。
         return {
             "kind": "script",
             "script": "music_backfill",
-            "variables": {"query": query, "play": True},
-            "say": "库里没有%s，我这就去找，下好自动播" % query,
+            "variables": {"query": query},
+            "say": "库里没有%s，我这就去找，下好后只加入曲库，不会自动播放"
+                   % query,
         }
 
     if tool_name == "music_transport":
@@ -320,12 +322,13 @@ VALID_SIGNALS = {
 }
 
 
+# IMP-02：HTTP 受理 ≠ 播放器确认，播报语改用受理措辞，不宣称已完成。
 TRANSPORT_SAY: dict[str, str] = {
-    "pause": "已暂停",
+    "pause": "好的，正在暂停播放",
     "resume": "继续播放",
     "next": "下一首",
     "previous": "上一首",
-    "stop": "已停止播放",
+    "stop": "好的，正在停止播放",
     "volume_up": "音量已调大",
     "volume_down": "音量已调小",
 }

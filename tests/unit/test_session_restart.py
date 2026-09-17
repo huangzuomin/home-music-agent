@@ -13,8 +13,8 @@ import pytest
 from session import SessionStore
 
 
-@pytest.mark.xfail(strict=True, reason="G07/T21：命名 Session 重启后上下文丢失，修复在 IMP-02/03")
 def test_t21_named_session_context_survives_restart(tmp_path):
+    """IMP-02 已修复：create 记录直接使用命名 id，回放完整恢复。"""
     store_file = tmp_path / "agent-sessions.jsonl"
 
     # ---- 第一次运行 ----

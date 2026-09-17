@@ -142,15 +142,29 @@ class SessionStore:
             return sess, False
 
     def _new_named(self, session_id: str, user_id: str) -> dict[str, Any]:
-        sess = self._new_session(user_id)
-        # 用调用方给的 id 覆盖（客户端固定 session_id 的场景）
-        old = sess["session_id"]
-        sess["session_id"] = session_id
-        self._sessions.pop(old, None)
+        """创建**以调用方 id 命名**的会话。
+
+        ⚠️ IMP-02 修复（T21）：此前先建自动 id 会话（create 记录用自动 id）
+        再改名（update 记录用命名 id）——_replay() 回放时 update 因
+        ``sid not in self._sessions`` 被跳过，命名会话重启后上下文全部丢失。
+        现在 create 记录直接使用命名 id。
+        """
+        now = _now()
+        sess: dict[str, Any] = {
+            "session_id": session_id,
+            "user_id": user_id,
+            "scene": "",
+            "goal": "",
+            "planned_duration_min": 0,
+            "constraints": {},
+            "feedback": [],
+            "conversation": [],
+            "created_at": now,
+            "last_active": now,
+        }
         self._sessions[session_id] = sess
         self._active[user_id] = session_id
-        self._append({"op": "update", "session_id": session_id,
-                      "patch": {"session_id": session_id}})
+        self._append({"op": "create", "session_id": session_id, "session": sess})
         return sess
 
     def touch(self, sess: dict[str, Any]) -> None:
@@ -201,7 +215,10 @@ class SessionStore:
                      target: dict[str, Any], note: str = "") -> None:
         with self._lock:
             fb = sess.setdefault("feedback", [])
-            fb.append({"t": _iso(_now()), "signal": signal,
+            # IMP-02（T12）：每条反馈带全局唯一 event_id；读取侧（taste）按
+            # event_id 去重，消除累计快照 patch 的重复计分。
+            fb.append({"t": _iso(_now()), "event_id": uuid.uuid4().hex,
+                       "signal": signal,
                        "target": target, "note": (note or "")[:200]})
             del fb[:-50]  # 单 session 反馈上限，防爆
             sess["last_active"] = _now()

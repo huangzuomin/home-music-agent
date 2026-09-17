@@ -628,12 +628,11 @@ def run(args):
         result.update(ok=True, reason="local_hit", local_hit=True, track={
             "name": hit.get("name"), "uri": hit.get("uri"),
             "duration": hit.get("duration")})
+        # IMP-02：补库完成只报告资源就绪（asset_ready），不再自动播放。
+        result["asset_ready"] = True
         if args.play and not args.dry_run:
-            ok, err = ha_play_uri(hit["uri"])
-            result["played"] = ok
-            if not ok:
-                result["reason"] = "local_hit_play_failed: %s" % err
-                log("  [!] HA 播放失败：%s" % err)
+            result["autoplay_blocked"] = True
+            log("  [IMP-02] 请求携带 --play：自动播放已禁用，仅入库不改变当前播放")
         elif args.dry_run:
             log("  [dry-run] 不触发播放")
         return result
@@ -784,11 +783,11 @@ def run(args):
     result["tracks"] = [{"name": t.get("name"), "uri": t.get("uri"),
                          "duration": t.get("duration")} for t in found]
 
+    # IMP-02：补库完成只入库（asset_ready），不改变任何音箱的播放。
+    result["asset_ready"] = True
     if args.play:
-        ok, err = ha_play_uri(primary["uri"])
-        result["played"] = ok
-        if not ok:
-            log("  [!] HA 播放失败：%s" % err)
+        result["autoplay_blocked"] = True
+        log("  [IMP-02] 请求携带 --play：自动播放已禁用，仅入库不改变当前播放")
     return result
 
 

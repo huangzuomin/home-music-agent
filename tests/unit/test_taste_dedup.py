@@ -13,8 +13,8 @@ import pytest
 from session import SessionStore
 
 
-@pytest.mark.xfail(strict=True, reason="G04/T12：累计快照重复计分，修复在 IMP-02/09")
 def test_t12_like_a_then_b_counted_once_each(monkeypatch, tmp_path):
+    """IMP-02 已修复：event_id 幂等 + 快照重复计分消除。"""
     import time
 
     import taste as taste_mod

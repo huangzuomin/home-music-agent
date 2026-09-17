@@ -282,7 +282,8 @@ def _make_job(query: str, req: "BackfillReq") -> dict:
             "out": req.out or MUSIC_DIR,
             "min_duration": req.min_duration,
             "pick": req.pick if req.pick is not None else DEFAULT_PICK,
-            "play": bool(req.play),
+            "play": False,                # IMP-02：自动播放已阻断
+            "play_blocked": bool(req.play),
             "dry_run": bool(req.dry_run),
         },
         "result": None,
@@ -308,8 +309,10 @@ def _run_job(job: dict):
            "--min-duration", str(opt["min_duration"]),
            "--pick", str(opt.get("pick") or DEFAULT_PICK),
            "--timeout", str(JOB_TIMEOUT)]
-    if opt["play"]:
-        cmd.append("--play")
+    if opt.get("play"):
+        # IMP-02：自动播放路径已阻断——play=true 不再转发给 CLI。
+        job["play_blocked"] = True
+        log("  [IMP-02] 作业携带 play=true，已被阻断（仅入库）")
     if opt["dry_run"]:
         cmd.append("--dry-run")
 
@@ -384,7 +387,9 @@ class BackfillReq(BaseModel):
     min_duration: int = Field(60, ge=10, description="最短可接受时长（秒）")
     pick: int | None = Field(None, ge=1, le=20,
                              description="下载几条不同作品（丰富曲库）；默认取服务端 PICK")
-    play: bool = Field(True, description="成功后经 HA 播放")
+    play: bool = Field(False, description=(
+        "已弃用（IMP-02）：补库完成只入库不播放；此字段仅保留兼容，"
+        "传 true 也会被忽略"))
     dry_run: bool = Field(False, description="只决策不下载")
 
 
