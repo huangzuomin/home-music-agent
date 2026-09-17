@@ -58,6 +58,7 @@ import storage as storage_mod
 import devices as devices_mod
 import auth as auth_mod
 import health as health_mod
+import scene_catalog as scene_catalog_mod
 
 HA_BASE = os.environ.get("HA_BASE", "http://127.0.0.1:8123")
 ENV_PATH = pathlib.Path(os.environ.get("ENV_PATH", "/opt/home-music-agent/.env"))
@@ -84,6 +85,7 @@ ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 STT_BASE = os.environ.get("STT_BASE", "http://127.0.0.1:8100")
 NAS_EXPECTED_SOURCE = os.environ.get("NAS_EXPECTED_SOURCE", "")
 NAS_MOUNT_POINT = os.environ.get("NAS_MOUNT_POINT", "/mnt/music")
+SCENES_FILE = os.environ.get("SCENES_FILE", "config/scenes.yaml")
 CONTEXT_TRACKS = int(os.environ.get("CONTEXT_TRACKS", "20"))
 CONVERSATION_TURNS = int(os.environ.get("CONVERSATION_TURNS", "10"))
 
@@ -727,6 +729,13 @@ def auth_revoke(body: dict[str, Any]):
         return JSONResponse({"error": "PERMISSION_DENIED"}, status_code=403)
     ok = auth.revoke(str(body.get("device_id") or ""))
     return {"ok": ok}
+
+
+@app.get("/scenes")
+def scenes() -> dict[str, Any]:
+    """IMP-06：场景就绪度报告。未就绪/停用的场景显式标 disabled。"""
+    scene_list = scene_catalog_mod.load_scenes(SCENES_FILE)
+    return {"scenes": scene_catalog_mod.catalog_report(scene_list)}
 
 
 @app.get("/health")
