@@ -1,0 +1,81 @@
+{
+  "task": "IMP-00",
+  "generated_at": "2026-09-17",
+  "repo": {
+    "url": "https://github.com/huangzuomin/home-music-agent",
+    "branch": "main",
+    "baseline_commit": "31ad4368fef4d9f5f5c579aa0e9e4f0ef678d86d",
+    "head_at_check": "31ad4368fef4d9f5f5c579aa0e9e4f0ef678d86d",
+    "uncommitted_changes": 0
+  },
+  "deployment": {
+    "host": "VM1 (Ubuntu, Docker)",
+    "app_dir": "/opt/home-music-agent",
+    "app_dir_is_git": false,
+    "containers": [
+      {"name": "home-assistant", "image": "ghcr.io/home-assistant/home-assistant:stable", "image_id_prefix": "0fafae2139c2", "ports": ["8123"], "status": "running"},
+      {"name": "music-assistant", "image": "ghcr.io/music-assistant/server:latest", "image_id_prefix": "db61b915e4fb", "ports": ["8095"], "status": "running"},
+      {"name": "stt-service", "image": "home-music-agent-stt-service (built)", "ports": ["8100"], "status": "running"},
+      {"name": "voice-gateway", "image": "home-music-agent-voice-gateway (built)", "ports": ["8200"], "status": "running"},
+      {"name": "music-fetcher", "image": "home-music-agent-music-fetcher (built)", "ports": ["8300"], "status": "running"},
+      {"name": "home-music-pwa", "image": "python:3.12-slim", "ports": ["8400"], "status": "running", "in_open_source_compose": false},
+      {"name": "home-music-proxy", "image": "caddy:2-alpine", "status": "running", "in_open_source_compose": false}
+    ],
+    "ports_lan_exposed": ["8123", "8095", "8100", "8200", "8300"],
+    "https_entry": {
+      "exists": true,
+      "implementation": "caddy:2-alpine",
+      "routes": {"/gw/*": "gateway:8200", "/stt/*": "stt:8100", "default": "pwa:8400"},
+      "body_limit": "20MB",
+      "cert_trust_verified": false
+    }
+  },
+  "storage": {
+    "music_library": {"source": "nas-nfs-v3", "mount": "/mnt/music", "capacity": "7.3T", "used": "2.4T", "mode": "rw"},
+    "root_disk_used_percent": 81,
+    "stt_model": {"type": "sense-voice-onnx", "files": ["model.onnx", "model.int8.onnx", "tokens.txt"]},
+    "session_store": "data/sessions/*.jsonl (gateway rw, fetcher ro)"
+  },
+  "config": {
+    "env_keys": [
+      "HA_URL", "HA_USERNAME", "HA_PASSWORD", "MA_URL", "MA_USERNAME", "MA_PASSWORD",
+      "STT_URL", "MA_LONG_TOKEN", "ZHIPU_API_KEY", "ZHIPU_BASE", "ZHIPU_MODEL",
+      "LLM_API_KEY", "LLM_BASE", "LLM_MODEL",
+      "HA_ACCESS_TOKEN", "HA_REFRESH_TOKEN", "HA_CLIENT_ID"
+    ],
+    "values_read": false
+  },
+  "write_paths": [
+    "voice-gateway /command,/agent (via HA scripts)",
+    "HA scripts: music_play_query/music_play_uri/music_filler/music_volume_set",
+    "music-fetcher completion callback -> HA music_play_uri",
+    "HA automation: daily enrich 03:30 -> fetcher",
+    "physical remote (Squeezebox) [external/human]",
+    "MA web UI [external/human]",
+    "PWA write paths [unverified]"
+  ],
+  "capabilities_ma": {
+    "verified": ["music/search", "music/tracks/library_items", "music/sync", "players/all", "play_media via HA", "queue add via HA"],
+    "unverified": ["player_queues/current", "queue_id discovery", "next/previous", "future queue delete", "album tracks", "favorites", "recently played", "volume/mute via MA", "player events stream"],
+    "http_api_surface": ["api", "auth/login", "auth/providers", "info", "setup"],
+    "command_api_transport": "websocket"
+  },
+  "players": [
+    {"name": "study-room (Cast)", "state": "idle"},
+    {"name": "squeezebox-touch", "state": "playing"}
+  ],
+  "voice_entries": [
+    {"name": "windows-client", "mode": "vad+openwakeword", "status": "production"},
+    {"name": "xvf3800-satellite", "mode": "vad (WAKE_ENABLED=0)", "status": "production"},
+    {"name": "pwa", "status": "running, capability unreviewed"}
+  ],
+  "drift": [
+    {"id": "R-NEW-01", "item": "deployment dir not under git"},
+    {"id": "R-NEW-02", "item": "HA/MA floating image tags"},
+    {"id": "R-NEW-03", "item": "pwa/proxy services missing from open-source compose"},
+    {"id": "R-NEW-04", "item": "five business ports bound to 0.0.0.0"},
+    {"id": "R-NEW-05", "item": "MA command surface websocket-only; players response lacks active/queue_id"},
+    {"id": "R-NEW-06", "item": "root disk 81% used"},
+    {"id": "R-NEW-07", "item": "existing PWA never reviewed"}
+  ]
+}
