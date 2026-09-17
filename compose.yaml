@@ -1,0 +1,116 @@
+# Home Music Agent MVP v0.2
+# Phase 1: HA + MA 框架（host 网络，保证 mDNS / SSDP / Squeezebox / Cast 发现）
+# Phase 3: STT 服务
+# Phase 4: Voice Gateway（规则意图解析 → 经 HA script 下发音乐动作）
+services:
+  home-assistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: home-assistant
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./config/home-assistant:/config
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      TZ: Asia/Shanghai
+
+  music-assistant:
+    image: ghcr.io/music-assistant/server:latest
+    container_name: music-assistant
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./config/music-assistant:/data
+      - /etc/localtime:/etc/localtime:ro
+      # 群晖 music 共享（NFS 可读写挂载，见 /etc/fstab）
+      - /mnt/music:/music:rw
+    environment:
+      TZ: Asia/Shanghai
+
+  stt-service:
+    build: ./services/stt
+    container_name: stt-service
+    restart: unless-stopped
+    ports:
+      - "8100:8100"
+    volumes:
+      - ./data/models:/models:ro
+      - ./config/stt:/config:ro
+      - ./data/transcripts:/transcripts
+    environment:
+      TZ: Asia/Shanghai
+      MODEL_DIR: /models/sense-voice
+      NUM_THREADS: "2"
+      STT_LANGUAGE: auto
+
+  # Phase 4：语音意图网关。
+  # 关键约束（D13）：本服务**不直连 MA**，音乐动作一律经 HA script 下发。
+  # 网络用 host，方便直接访问 127.0.0.1:8123 的 HA；凭据从挂载的 .env 只读读取。
+  voice-gateway:
+    build: ./services/voice-gateway
+    container_name: voice-gateway
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /opt/home-music-agent/.env:/opt/home-music-agent/.env:ro
+      - ./data/sessions:/app/data/sessions
+    environment:
+      TZ: Asia/Shanghai
+      HA_BASE: "http://127.0.0.1:8123"
+      ENV_PATH: "/opt/home-music-agent/.env"
+      LOG_PATH: "/app/data/sessions/voice-gateway.jsonl"
+      AGENT_ENABLED: "true"
+      AGENT_TIMEOUT: "12"
+      TTS_ENABLED: "true"
+      TTS_VOICE: "zh-CN-XiaoxiaoNeural"
+      # ---- v0.3：/agent（Session 化 Agent，需求文档 §10-§14）----
+      # false 时 /agent 自动降级为旧 /command 逻辑（§30 回滚开关）
+      AGENT_SESSION_ENABLED: "true"
+      CONTEXT_TRACKS: "20"
+      CONVERSATION_TURNS: "10"
+      # Smart Path 硬超时（秒）：超时即降级规则路径。
+      # 实测智谱 API 单次 2.4s、连发时劣化到 25s+，必须设上限。
+      # 必须小于 AGENT_TIMEOUT（socket 级），否则永远轮不到它生效。
+      AGENT_HARD_TIMEOUT: "8"
+      # DeepSeek V4 为推理模型，默认先生成思考 token（实测慢 2~3 倍且易截断
+      # tool_call）。true = 请求体带 thinking={"type":"disabled"}。
+      LLM_DISABLE_THINKING: "true"
+
+  # 按需补库服务（musicdl 生产化）：本地库没有的歌 → musicdl 下载 → MA 重扫 →
+  # 经 HA script.music_play_uri 播放。
+  # * 单工作者串行（下载是重活，并发只会互相拖死），作业异步（返回 job_id）
+  # * /mnt/music 挂为 /music:rw，与 MA 容器同一份 NFS，落盘即入库
+  # * 凭据只读挂载 .env；MA 只用于「查库 + 触发重扫」，播放动作走 HA（D13）
+  music-fetcher:
+    build: ./services/music-fetcher
+    container_name: music-fetcher
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./services/music-fetcher/data:/app/data
+      - /mnt/music:/music:rw
+      - /opt/home-music-agent/.env:/opt/home-music-agent/.env:ro
+      # 口味画像只读 voice-gateway 落的三个 jsonl（播放行为/显式反馈/请求日志）
+      - ./data/sessions:/app/sessions:ro
+    environment:
+      TZ: Asia/Shanghai
+      ENV_PATH: "/opt/home-music-agent/.env"
+      MUSIC_DIR: "/music"
+      MUSICDL_DIR: "/app"
+      MUSICDL_PY: "/usr/local/bin/python3"
+      MUSICDL_SCRIPT: "/app/musicdl_fetch.py"
+      # 音源组合：实测「周杰伦 稻香」原唱命中率 JBSou 10/10、Mitu 5/6、网易云 1/10。
+      # 音源越多越慢（JBSou 单次约 100s），按需增减。
+      SOURCES: "JBSouMusicClient,MituMusicClient,NeteaseMusicClient"
+      # 一次补几条不同作品。1 = 只补点播那一首（语音兜底用这条，pick=1 时
+      # 「本地已有」能正常短路）。补库/充实曲库请显式传 pick=3（见 fetcher_job.py）。
+      PICK: "1"
+      # 多源合并搜索的硬超时（秒）。实测三源稳定 74s，但上游偶发抖动，
+      # 曾在容器里一次 >120s 导致整个作业白跑 —— 给 3 倍余量。
+      MUSICDL_SEARCH_TIMEOUT: "240"
+      # 单曲体积上限（MB）。聚合音源的 flac 常见 100~200MB/首，实测抓到过
+      # 208MB 的《屋顶》、215MB 的《晴天 (Live)》。语音点播没必要为单曲吃这么大。
+      MAX_FILE_MB: "80"
+      MA_URL: "http://127.0.0.1:8095"
+      HA_URL: "http://127.0.0.1:8123"
+      REJECT_DIR: "/app/data/reject"

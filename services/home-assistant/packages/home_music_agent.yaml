@@ -1,0 +1,499 @@
+# =============================================================================
+# Home Music Agent MVP v0.2 — Phase 4 编排层（HA 侧）
+# =============================================================================
+# 职责：把「音乐意图」编排成一串 HA 动作，最终经 rest_command 打到 Music Assistant。
+#   STT文本 → Voice Gateway(VM1) → HA script → rest_command.ma_call → MA /api → 播放器
+#
+# 设计要点：
+#   * MA 的 /api 是「单端点 + command 字段」的 JSON-RPC 风格，故只用一个通用
+#     rest_command（ma_call），由模板参数决定 command 与 args。
+#   * 目标播放器由 sensor.ma_target_player 解析：优先 squeezelite(Squeezebox)，
+#     否则第一个 available。Touch 上线后不需要改任何脚本。
+#   * 令牌走 secrets.yaml（ma_token / ma_base），不进文档、不进 Git。
+#
+# ⚠️ 2026-09-13 修复（Phase 6 前置）：
+#   原 music_play_query 只调 music/search，拿到结果后脚本就结束了，
+#   没有任何「入队播放」动作 → 表现为「说有在放，但没声音」。
+#   修复：MA 的 music/search 返回的是 **字典**（{artists,albums,tracks,...}）
+#   而非列表，且 play_media 需要 media uri 而非关键词。借助 HA 2024.8+ 的
+#   rest_command response_variable 能力，把搜索结果取回 HA 模板里解析出 uri，
+#   再调 player_queues/play_media 完成入队播放。动作仍由 HA 发起 → 符合 D13。
+# =============================================================================
+
+rest_command:
+  ma_call:
+    url: !secret ma_base
+    method: POST
+    headers:
+      Authorization: !secret ma_auth
+      Content-Type: "application/json"
+    payload: >-
+      {"command": "{{ ma_command }}", "args": {{ ma_args | default("{}") }}}
+
+  # 带响应的搜索：把 MA 的 JSON 结果取回 HA，供模板解析 uri
+  ma_search:
+    url: !secret ma_base
+    method: POST
+    headers:
+      Authorization: !secret ma_auth
+      Content-Type: "application/json"
+    payload: >-
+      {"command": "music/search",
+       "args": {"search_query": "{{ ma_query }}",
+                "media_types": ["{{ ma_media_type | default('track') }}"],
+                "limit": 10}}
+    # ⚠️ response 支持需 HA 2024.8+；2026.9.2 实测 SupportsResponse.OPTIONAL 存在
+    timeout: 20
+
+  # ---------------------------------------------------------------- 按需补库
+  # 打到 VM1 的 music-fetcher（:8300）。作业是异步的：这里只提交，返回 job_id。
+  # 下载完成后由 music-fetcher 回调本包的 script.music_play_uri 播放。
+  music_backfill:
+    url: "http://127.0.0.1:8300/backfill"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+    # ⚠️ Jinja 渲染布尔会输出 Python 的 "True"/"False"，直接进 JSON 就是
+    #    非法 JSON（music-fetcher 会 422）。必须显式转成 JSON 的 true/false。
+    payload: >-
+      {"query": "{{ ma_query }}",
+       "play": {{ 'false' if (play | default(true) | string | lower) in ('false', 'no', '0', 'off', 'none') else 'true' }},
+       "min_duration": {{ min_duration | default(60) }}}
+
+  # 本地曲库随机列表（带响应）：空窗填充用。实测（2026-09-13）：
+  # music/tracks/library_items 支持 order_by=random，返回 track 字典列表
+  # （含 uri / name / artists / is_playable）。
+  ma_library_tracks:
+    url: !secret ma_base
+    method: POST
+    headers:
+      Authorization: !secret ma_auth
+      Content-Type: "application/json"
+    payload: >-
+      {"command": "music/tracks/library_items",
+       "args": {"limit": 200, "offset": 0, "order_by": "random"}}
+
+  # 每日曲库充实（方案 2）：调 music-fetcher /enrich/submit（**异步版**）。
+  # ⚠️ 2026-09-14 改异步：原先打同步 /enrich，实测提交阶段要 390s（最坏 570s），
+  #    而 HA rest_command 实测 300s 就被掐断 → 自动化报 timeout、完成通知丢失
+  #    （下载其实照跑）。现在 HA 只负责「下单」：/enrich/submit 立即 202，
+  #    下载完成后由 music-fetcher 回调 persistent_notification 给回执。
+  #    所以 timeout 给 60 足够，别再加回去。
+  enrich_call:
+    url: "http://127.0.0.1:8300/enrich/submit"
+    method: POST
+    timeout: 60
+    headers:
+      Content-Type: "application/json"
+    payload: >-
+      {"n": {{ n | default(3) }}, "max_size_mb": {{ max_size_mb | default(80) }}}
+
+  music_backfill_job:
+    url: "http://127.0.0.1:8300/jobs/{{ job_id }}"
+    method: GET
+    timeout: 20
+
+input_boolean:
+  # 总开关：关掉后「库里没有」就什么都不做（避免误下载）
+  music_auto_backfill:
+    name: "音乐：库里没有时自动补库"
+    icon: mdi:cloud-download
+    initial: true
+
+# 最近一次曲库充实的回执（由 music-fetcher 回写）。
+# ⚠️ 2026-09-14 实测：本机 HA 的 persistent_notification.create 返回 []、
+#    websocket 读到的通知恒为 0 条（建了读不到）—— 所以回执以**状态实体**为准，
+#    HA UI 里能直接看到「入库 3/3（434 秒）：左乙-日记、…」。
+input_text:
+  music_enrich_last:
+    name: "曲库充实（最近一次）"
+    max: 255
+
+script:
+  # ---------------------------------------------------------------- 基础控制
+  music_play_pause:
+    alias: "音乐：播放/暂停"
+    sequence:
+      - service: rest_command.ma_call
+        data:
+          ma_command: "players/cmd/play_pause"
+          ma_args: '{"player_id": "{{ states(''sensor.ma_target_player'') }}"}'
+
+  music_resume:
+    alias: "音乐：继续"
+    # 2026-09-13 晚修复：队列播完（idle）后 players/cmd/play（unpause 语义）
+    # 拉不起来，表现「停了就再也放不了」。改用队列级 player_queues/play，
+    # 暂停态与播完态都能重启队列播放。
+    sequence:
+      - service: rest_command.ma_call
+        data:
+          ma_command: "player_queues/play"
+          ma_args: '{"queue_id": "{{ states(''sensor.ma_target_player'') }}"}'
+
+  music_pause:
+    alias: "音乐：暂停"
+    sequence:
+      - service: rest_command.ma_call
+        data:
+          ma_command: "players/cmd/pause"
+          ma_args: '{"player_id": "{{ states(''sensor.ma_target_player'') }}"}'
+
+  music_stop:
+    alias: "音乐：停止"
+    sequence:
+      - service: rest_command.ma_call
+        data:
+          ma_command: "players/cmd/stop"
+          ma_args: '{"player_id": "{{ states(''sensor.ma_target_player'') }}"}'
+
+  music_next:
+    alias: "音乐：下一首"
+    sequence:
+      - service: rest_command.ma_call
+        data:
+          ma_command: "player_queues/next"
+          ma_args: '{"queue_id": "{{ states(''sensor.ma_target_player'') }}"}'
+
+  music_previous:
+    alias: "音乐：上一首"
+    sequence:
+      - service: rest_command.ma_call
+        data:
+          ma_command: "player_queues/previous"
+          ma_args: '{"queue_id": "{{ states(''sensor.ma_target_player'') }}"}'
+
+  music_volume_up:
+    alias: "音乐：音量大一点"
+    sequence:
+      - service: rest_command.ma_call
+        data:
+          ma_command: "players/cmd/volume_up"
+          ma_args: '{"player_id": "{{ states(''sensor.ma_target_player'') }}"}'
+
+  music_volume_down:
+    alias: "音乐：音量小一点"
+    sequence:
+      - service: rest_command.ma_call
+        data:
+          ma_command: "players/cmd/volume_down"
+          ma_args: '{"player_id": "{{ states(''sensor.ma_target_player'') }}"}'
+
+  # ---------------------------------------------------------------- 绝对音量
+  # ★ 2026-09-13 新增。之前没有绝对音量动作，语音说「音量调到30」只能退化成
+  #   volume_down（只掉一格），用户体感就是「语音调不了音量」。
+  #   ⚠️ MA 的 mute_control 在本播放器上是 "none"（players/all 可见），
+  #      players/cmd/volume_mute 会报 Internal server error —— 所以「静音」
+  #      统一用 volume_level=0 表达，不要改成 volume_mute。
+  music_volume_set:
+    alias: "音乐：设置音量"
+    fields:
+      level:
+        description: "目标音量 0-100（0 = 静音）"
+        example: "30"
+    sequence:
+      - variables:
+          # 夹到 0~100，挡住模型给的越界值
+          _lvl: "{{ [ [level | default(50) | int, 0] | max, 100 ] | min }}"
+      - service: rest_command.ma_call
+        data:
+          ma_command: "players/cmd/volume_set"
+          ma_args: >-
+            {"player_id": "{{ states('sensor.ma_target_player') }}",
+             "volume_level": {{ _lvl }}}
+      - service: persistent_notification.create
+        data:
+          title: "音乐音量"
+          message: "已设为 {{ _lvl }}"
+          notification_id: "music_volume"
+
+  # ---------------------------------------------------------------- 点播
+  # 由 gateway 传入 query / media_type；内部「搜索 → 取首条 → 入队播放」一气呵成。
+  music_play_query:
+    alias: "音乐：点播"
+    fields:
+      query:
+        description: "搜索词"
+        example: "周杰伦"
+      media_type:
+        description: "track / artist / album / playlist / radio"
+        example: "track"
+      allow_backfill:
+        description: "库里没有时是否自动下载（抽象场景查询由 LLM 传 false）"
+        example: "true"
+    sequence:
+      # Step 1 — 搜索（带响应），结果存进 searched
+      - service: rest_command.ma_search
+        data:
+          ma_query: "{{ query }}"
+          ma_media_type: "{{ media_type | default('track') }}"
+        response_variable: searched
+
+      # Step 2 — 解析结果：**本地库优先**
+      #   ⚠️ 关键认知（2026-09-13 实测）：MA 的 music/search 是**跨 provider** 的，
+      #      库里没有的歌会返回 QQ 音乐的在线结果（uri = qqmusic--xxx://track/...）。
+      #      未登录时这些只能播 **约 60 秒试听**（见「音源试听陷阱」）。
+      #      所以判据不是「有没有结果」，而是「有没有 **library://** 的本地结果」。
+      #   music/search 返回：{tracks: [...], albums: [...], artists: [...], ...}
+      - variables:
+          _pool: >-
+            {{ (searched.content.tracks or [])
+               + (searched.content.albums or [])
+               + (searched.content.artists or [])
+               + (searched.content.playlists or []) }}
+          _playable: >-
+            {{ _pool | selectattr('is_playable', 'defined') | selectattr('is_playable') | list }}
+          _local_uri: >-
+            {% set ns = namespace(u='') %}{% for t in _playable %}{% if ns.u == '' and t.uri is string and 'library://' in t.uri %}{% set ns.u = t.uri %}{% endif %}{% endfor %}{{ ns.u }}
+          _uri: >-
+            {{ _local_uri if _local_uri != ''
+               else (_playable | first).uri if (_playable | count) > 0
+               else ((searched.content.tracks or []) | map(attribute='uri') | list | first
+                     if (searched.content.tracks or []) | count > 0 else 'none') }}
+
+      # Step 3 — 入队播放（本地优先；没有本地就先用在线版垫场）
+      #   ⚠️ option 必须传 "replace"：实测不带 option 时 MA 默认 **追加到队尾**，
+      #      用户点 3 首歌队列就堆 3 首，点第 4 首会从队尾接而不是立刻切。
+      #      replace = 清空队列并以新曲开始播放（符合「点播」的直觉）。
+      - if:
+          - condition: template
+            value_template: "{{ _uri not in ['none', 'None', ''] }}"
+        then:
+          - service: rest_command.ma_call
+            data:
+              ma_command: "player_queues/play_media"
+              ma_args: >-
+                {"queue_id": "{{ states('sensor.ma_target_player') }}",
+                 "media": "{{ _uri }}",
+                 "option": "replace"}
+
+      # Step 3b — 组播放列表（2026-09-13 晚）：点播不再只入 1 首。
+      #   实测教训：队列 1 首 + 播放器 repeat=all 曾致「单曲无限循环」；
+      #   repeat 关掉后 1 首播完队列即空。把搜索结果里其余可播的**本地**曲目
+      #   （最多 5 首）追加进队，点播 = 组一个短播放列表。
+      #   （artist/album/playlist 型搜索 MA 会整集展开，无需此步）
+      - variables:
+          _extra: >-
+            {% if (media_type | default('track')) == 'track' %}
+              {% set ex = (searched.content.tracks or [])
+                 | selectattr('is_playable', 'defined') | selectattr('is_playable')
+                 | selectattr('uri', 'defined')
+                 | selectattr('uri', 'match', '^library://')
+                 | map(attribute='uri') | list | difference([_uri]) | shuffle %}
+              {{ ex[:5] }}
+            {% else %}
+              []
+            {% endif %}
+      - if:
+          - condition: template
+            value_template: >-
+              {{ _uri not in ['none', 'None', ''] and _extra | length > 0 }}
+        then:
+          - service: rest_command.ma_call
+            data:
+              ma_command: "player_queues/play_media"
+              ma_args: >-
+                {"queue_id": "{{ states('sensor.ma_target_player') }}",
+                 "media": {{ _extra | tojson }},
+                 "option": "add"}
+
+      # Step 3b2 — 本地匹配不足时用随机本地曲补齐（2026-09-13 深夜实测：
+      #   搜「钢琴」本地只命中 1 首，其余全是 QQ 在线试听 ~60s。
+      #   播放列表主体必须是本地完整版 → 差额用随机本地曲补位，复用 music_filler）。
+      - variables:
+          _fill: >-
+            {% if (media_type | default('track')) == 'track'
+                  and _uri not in ['none', 'None', ''] %}
+              {{ [5 - (_extra | length), 0] | max }}
+            {% else %}
+              0
+            {% endif %}
+      - if:
+          - condition: template
+            value_template: "{{ _fill | int > 0 }}"
+        then:
+          - service: script.music_filler
+            data:
+              count: "{{ _fill }}"
+
+      # Step 3c — 开 MA autoplay（2026-09-13 晚）：队列放完自动按当前曲续播
+      #   同类（radio 模式），兜底「播完就停」。
+      - if:
+          - condition: template
+            value_template: "{{ _uri not in ['none', 'None', ''] }}"
+        then:
+          - service: rest_command.ma_call
+            data:
+              ma_command: "player_queues/autoplay"
+              ma_args: >-
+                {"queue_id": "{{ states('sensor.ma_target_player') }}",
+                 "autoplay_enabled": true}
+
+      # Step 4 — 没有本地版本 → 提交补库作业（受总开关控制）
+      #   作业异步：下好后由 music-fetcher 回调 script.music_play_uri，
+      #   用完整版 replace 掉刚才的在线垫场。
+      - if:
+          - condition: template
+            value_template: >-
+              {{ _local_uri == ''
+                 and is_state('input_boolean.music_auto_backfill', 'on')
+                 and (allow_backfill | default(true) | string | lower) not in ('false', 'no', '0', 'off') }}
+        then:
+          - service: rest_command.music_backfill
+            data:
+              ma_query: "{{ query }}"
+              play: true
+            response_variable: bf
+          - service: persistent_notification.create
+            data:
+              title: "音乐补库"
+              message: >-
+                本地库没有《{{ query }}》，已提交补库作业
+                （{{ (bf.content | default({})).status | default('未知') }}）；
+                先播在线版本垫场，下载完成后自动换成完整版。
+          # Step 5 — 空窗填充（2026-09-13）：在线试听只有 ~60s，补库要 2~4 分钟，
+          #   试听播完到完整版接管之间是死寂。追加 2 首本地曲垫上；
+          #   补库完成后 fetcher 仍用 replace 整队换目标曲，filler 自然被清掉。
+          - service: script.music_filler
+            data:
+              count: 2
+
+  # -------------------------------------------------------------- 空窗填充
+  # 从本地曲库随机挑 N 首追加到当前队列（不 replace、不立即播放）——
+  # 当前垫场播完后自动接上，避免「试听完 → 等下载」的静音空窗。
+  music_filler:
+    alias: "音乐：空窗填充"
+    fields:
+      count:
+        description: "追加几首本地曲（1-5）"
+        example: "2"
+    sequence:
+      - service: rest_command.ma_library_tracks
+        response_variable: loc
+      - variables:
+          _n: "{{ [count | default(2) | int, 1] | max }}"
+          _uris: >-
+            {{ ((loc.content | default([]))
+               | selectattr('is_playable', 'defined')
+               | selectattr('is_playable')
+               | map(attribute='uri') | list | shuffle)[:_n] }}
+      - if:
+          - condition: template
+            value_template: "{{ _uris | length > 0 }}"
+        then:
+          - service: rest_command.ma_call
+            data:
+              ma_command: "player_queues/play_media"
+              ma_args: >-
+                {"queue_id": "{{ states('sensor.ma_target_player') }}",
+                 "media": {{ _uris | tojson }},
+                 "option": "add"}
+
+  # ---------------------------------------------------------------- 按 URI 播放
+  # 供 music-fetcher 下载完成后回调（D13：播放动作仍由 HA 发起）
+  music_play_uri:
+    alias: "音乐：按 URI 播放"
+    fields:
+      uri:
+        description: "MA 资源 URI，如 library://track/12"
+        example: "library://track/12"
+    sequence:
+      - service: rest_command.ma_call
+        data:
+          ma_command: "player_queues/play_media"
+          ma_args: >-
+            {"queue_id": "{{ states('sensor.ma_target_player') }}",
+             "media": "{{ uri }}",
+             "option": "replace"}
+
+  # ---------------------------------------------------------------- 手动补库
+  # 供 UI / 语音 / 自动化直接触发；不阻塞，返回 job_id
+  music_backfill:
+    alias: "音乐：按需补库"
+    fields:
+      query:
+        description: "查询词，如 '周杰伦 稻香'"
+        example: "周杰伦 稻香"
+      play:
+        description: "下载完成后是否播放"
+        example: "true"
+    sequence:
+      - service: rest_command.music_backfill
+        data:
+          ma_query: "{{ query }}"
+          play: "{{ play | default('true') }}"
+        response_variable: bf
+      - service: persistent_notification.create
+        data:
+          title: "音乐补库"
+          message: >-
+            《{{ query }}》补库作业已提交：
+            {{ (bf.content | default({})).job_id | default('提交失败') }}
+            （状态 {{ (bf.content | default({})).status | default('未知') }}）
+
+  # ---------------------------------------------------------------- 手动充实
+  # 立刻按本地口味推荐并补库 N 首（与每日自动化同一个动作，供 UI/语音触发）
+  music_enrich_now:
+    alias: "音乐：立即充实曲库"
+    fields:
+      n:
+        description: "补几首（1-20）"
+        example: "3"
+    sequence:
+      - service: rest_command.enrich_call
+        data:
+          n: "{{ n | default(3) }}"
+        response_variable: ef
+        continue_on_error: true
+      - service: persistent_notification.create
+        data:
+          title: "曲库充实"
+          notification_id: "music_enrich"
+          message: >-
+            {% if (ef.content | default({})).accepted %}
+              已下单（任务 {{ (ef.content | default({})).task_id | default('?') }}）：
+              后台正在选题与下载，完成后会再发一条「曲库充实：完成」。
+            {% else %}
+              提交失败：{{ ef.content | default('无响应') }}。
+            {% endif %}
+
+# ---------------------------------------------------------------- 每日自动充实（方案 2）
+# 每天凌晨 3:30，按本地口味自动推荐 3 首并补库 —— 让「点播即命中本地」的比例
+# 越来越高，从源头减少「垫场 + 空窗」。受 music_auto_backfill 总开关控制。
+automation:
+  - id: music_library_daily_enrich
+    alias: "音乐：曲库每日自动充实"
+    description: >
+      每天 03:30 调 music-fetcher /enrich/submit（画像 v2，异步）：
+      口味池 = 播放行为（听完+3/快跳-2）与显式反馈（±10）加权的歌手
+      随机抽样；探索池 = 网易热歌/新歌/飙升榜随机一首（防信息茧房）。
+      默认 2+1 配额、90 天半衰期。HA 只下单，回执（选题 + 逐首结果）
+      由 music-fetcher 回调通知。
+      ⚠️ 触发时刻按 HA 时区（configuration.yaml 的 time_zone）解释——
+      2026-09-14 修：此前未配 time_zone，HA 默认 UTC，03:30 实际跑在
+      北京时间 11:30。
+    trigger:
+      - platform: time
+        at: "03:30:00"
+    condition:
+      - condition: state
+        entity_id: input_boolean.music_auto_backfill
+        state: "on"
+    action:
+      - service: rest_command.enrich_call
+        data:
+          n: 3
+          max_size_mb: 80
+        response_variable: ef
+        continue_on_error: true
+      - service: persistent_notification.create
+        data:
+          title: "曲库每日充实"
+          notification_id: "music_enrich"
+          message: >-
+            {% if (ef.content | default({})).accepted %}
+              已下单（任务 {{ (ef.content | default({})).task_id | default('?') }}）：
+              正在选题并下载 3 首，完成后会再发一条「曲库充实：完成」。
+            {% else %}
+              提交失败：{{ ef.content | default('无响应') }}。
+            {% endif %}
+    mode: single

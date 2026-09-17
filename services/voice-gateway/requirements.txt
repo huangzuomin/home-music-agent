@@ -1,0 +1,5 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+# ⚠️ 必须保持较新版本：Edge TTS 的 TrustedClientToken 会被微软轮换，
+#    旧版（7.0.0 实测）会 WSServerHandshakeError 403。7.2.8 验证可用。
+edge-tts==7.2.8

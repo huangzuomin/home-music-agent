@@ -1,0 +1,25 @@
+# ---- 凭据与私密配置（绝不提交）----
+.env
+*.token
+config/home-assistant/secrets.yaml
+
+# ---- Windows 语音客户端本机配置（含家庭内网 IP）----
+voice-client/config.json
+voice-client/probe_wake_link.json
+
+# ---- 固件构建产物与 vendored 运行时（tools/vendor-esp-tflite.* 可重建）----
+voice-client/xvf3800-satellite/.pio/
+voice-client/xvf3800-satellite/lib/
+voice-client/xvf3800-satellite/data/models/*.wav
+
+# ---- Python ----
+__pycache__/
+*.pyc
+.venv/
+pio-venv/
+
+# ---- IDE / 杂项 ----
+.idea/
+.vscode/
+*.log
+.DS_Store

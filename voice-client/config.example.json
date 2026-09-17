@@ -1,0 +1,43 @@
+{
+  "stt_url": "http://192.168.1.50:8100/transcribe",
+  "gateway_url": "http://192.168.1.50:8200/command",
+  "agent_url": "http://192.168.1.50:8200/agent",
+  "tts_url": "http://192.168.1.50:8200/tts",
+  "session_id": "living-room-current",
+  "tts_enabled": true,
+  "device": "",
+  "max_seconds": 30,
+  "hotkey_enabled": true,
+
+  "voice": {
+    "mode": "wake_word",
+    "wake_word": "hey_jarvis",
+    "wake_threshold": 0.45,
+    "wake_pause_max_sec": 30,
+    "ring_buffer_ms": 1200,
+    "frame_ms": 20,
+    "vad": {
+      "speech_start_threshold": 0.35,
+      "end_silence_ms": 800,
+      "speech_timeout_sec": 5,
+      "max_utterance_sec": 15
+    },
+    "tts": {
+      "enabled": true,
+      "minimal_reply": true,
+      "guard_ms": 300
+    }
+  },
+
+  "conversation": {
+    "follow_up_window_sec": 15
+  },
+
+  "agent": {
+    "context_tracks": 20,
+    "conversation_turns": 10,
+    "enable_music_plan": true,
+    "enable_feedback": true,
+    "enable_memory": false
+  }
+}
