@@ -1,0 +1,5 @@
+# IMP-01 测试最小依赖（CI 与本地一致）
+pytest>=8.0
+httpx>=0.27          # fastapi TestClient 依赖
+fastapi>=0.110       # 被测服务 voice-gateway 的运行依赖
+pydantic>=2.5

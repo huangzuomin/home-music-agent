@@ -1,0 +1,16 @@
+[
+  {
+    "player_id": "sq-1",
+    "name": "Squeezebox Touch",
+    "state": "playing",
+    "available": true,
+    "type": "squeezebox"
+  },
+  {
+    "player_id": "cast-1",
+    "name": "study-cast",
+    "state": "idle",
+    "available": true,
+    "type": "cast"
+  }
+]

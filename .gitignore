@@ -23,3 +23,6 @@ pio-venv/
 .vscode/
 *.log
 .DS_Store
+
+# ---- pytest 临时目录 ----
+.pytest-tmp/
