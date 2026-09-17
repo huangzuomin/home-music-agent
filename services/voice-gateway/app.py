@@ -41,7 +41,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel
 
@@ -56,6 +56,8 @@ import ha_executor as ha_executor_mod
 import coordinator as coordinator_mod
 import storage as storage_mod
 import devices as devices_mod
+import auth as auth_mod
+import health as health_mod
 
 HA_BASE = os.environ.get("HA_BASE", "http://127.0.0.1:8123")
 ENV_PATH = pathlib.Path(os.environ.get("ENV_PATH", "/opt/home-music-agent/.env"))
@@ -74,6 +76,14 @@ TTS_VOICE = os.environ.get("TTS_VOICE", tts_mod.DEFAULT_VOICE)
 AGENT_SESSION_ENABLED = os.environ.get("AGENT_SESSION_ENABLED", "true").lower() in ("1", "true", "yes")
 # IMP-03c：控制核心开关。false 时回到 IMP-02 行为（直接 HA script，安全默认保留）。
 CONTROL_CORE_V1 = os.environ.get("CONTROL_CORE_V1", "true").lower() in ("1", "true", "yes")
+# IMP-04：设备鉴权与限速。部署切换窗口置 true（cutover 检查单 §0）。
+DEVICE_AUTH_REQUIRED = os.environ.get("DEVICE_AUTH_REQUIRED", "false").lower() in ("1", "true", "yes")
+ALLOWED_ORIGINS = [h for h in os.environ.get(
+    "ALLOWED_ORIGINS", "http://localhost,http://127.0.0.1").split(",") if h]
+ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
+STT_BASE = os.environ.get("STT_BASE", "http://127.0.0.1:8100")
+NAS_EXPECTED_SOURCE = os.environ.get("NAS_EXPECTED_SOURCE", "")
+NAS_MOUNT_POINT = os.environ.get("NAS_MOUNT_POINT", "/mnt/music")
 CONTEXT_TRACKS = int(os.environ.get("CONTEXT_TRACKS", "20"))
 CONVERSATION_TURNS = int(os.environ.get("CONVERSATION_TURNS", "10"))
 
@@ -230,6 +240,58 @@ SCRIPT_TO_ACTION: dict[str, str] = {
     "music_stop": contracts.ACTION_STOP,
     "music_volume_set": contracts.ACTION_VOLUME_SET,
 }
+
+
+_device_auth: auth_mod.DeviceAuth | None = None
+_health_checker: health_mod.HealthChecker | None = None
+
+
+def get_device_auth() -> auth_mod.DeviceAuth:
+    global _device_auth
+    if _device_auth is None:
+        _device_auth = auth_mod.DeviceAuth(store=get_control_store())
+    return _device_auth
+
+
+def get_health_checker() -> health_mod.HealthChecker:
+    global _health_checker
+    if _health_checker is None:
+        store = get_control_store()
+        ma = get_ma()
+        _health_checker = health_mod.HealthChecker(
+            db_path=str(store.db_path),
+            ha_base=HA_BASE, ha_token=ha._token(),
+            ma_probe=lambda: ma.players() is not None,
+            player_available=lambda: bool(
+                (ma.pick_player() or {}).get("available", False)),
+            stt_base=STT_BASE,
+            nas_expected_source=NAS_EXPECTED_SOURCE,
+            nas_mount_point=NAS_MOUNT_POINT,
+            control_db_probe=lambda: store.db_path.exists(),
+        )
+    return _health_checker
+
+
+def _require_device(request_headers, body_device_id: str = "") -> str | None:
+    """设备鉴权依赖（DEVICE_AUTH_REQUIRED=true 时强制）。
+
+    返回 device_id（通过）或 None（拒绝，已写 reason）。
+    """
+    if not DEVICE_AUTH_REQUIRED:
+        return body_device_id or "local"
+    device_id = request_headers.get("X-Device-ID", "")
+    token = request_headers.get("X-Device-Token", "")
+    auth = get_device_auth()
+    if not auth.authenticate(device_id, token):
+        return None
+    if not auth.check_rate(device_id):
+        return None
+    return device_id
+
+
+def _check_origin(request_headers) -> bool:
+    origin = request_headers.get("Origin") or request_headers.get("origin")
+    return auth_mod.check_origin(origin, ALLOWED_ORIGINS)
 
 
 def get_sessions() -> session_mod.SessionStore:
@@ -620,6 +682,53 @@ class TTSIn(BaseModel):
     voice: str = TTS_VOICE
 
 
+# -------------------------------------------------- IMP-04 鉴权与健康
+
+@app.get("/livez")
+def livez() -> dict[str, Any]:
+    return get_health_checker().liveness()
+
+
+@app.get("/readyz")
+def readyz() -> dict[str, Any]:
+    """readiness：分组件上报；LLM/STT 故障不拉低基本播放控制的可用性。"""
+    return get_health_checker().readiness()
+
+
+@app.post("/auth/pairing-code")
+def auth_pairing_code(body: dict[str, Any]):
+    """管理员签发一次性配对码（需 X-Admin-Key，部署窗口配置 ADMIN_KEY）。"""
+    auth = get_device_auth()
+    res = auth.issue_pairing_code(
+        admin_key=str(body.get("admin_key") or ""),
+        admin_key_required=bool(ADMIN_KEY))
+    if not res.get("ok"):
+        return JSONResponse({"error": "PERMISSION_DENIED"}, status_code=403)
+    return res
+
+
+@app.post("/auth/pair")
+def auth_pair(body: dict[str, Any]):
+    auth = get_device_auth()
+    res = auth.pair(str(body.get("code") or ""),
+                    device_name=str(body.get("device_name") or ""),
+                    kind=str(body.get("kind") or "pwa"))
+    if res is None:
+        return JSONResponse({"error": "INVALID_OR_EXPIRED_CODE"},
+                            status_code=403)
+    return res
+
+
+@app.post("/auth/revoke")
+def auth_revoke(body: dict[str, Any]):
+    auth = get_device_auth()
+    if not auth.authenticate(str(body.get("admin_device_id") or ""),
+                             str(body.get("admin_token") or "")):
+        return JSONResponse({"error": "PERMISSION_DENIED"}, status_code=403)
+    ok = auth.revoke(str(body.get("device_id") or ""))
+    return {"ok": ok}
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     llm = get_llm()
@@ -651,9 +760,16 @@ def tool_list() -> dict[str, Any]:
 
 
 @app.post("/command")
-def command(body: CommandIn) -> dict[str, Any]:
+def command(body: CommandIn, request: Request) -> dict[str, Any]:
     t0 = time.time()
     text = (body.text or "").strip()
+    if len(text) > 500:
+        return JSONResponse({"error": "text too long (max 500)"}, status_code=413)
+    if not _check_origin(request.headers):
+        return JSONResponse({"error": "origin not allowed"}, status_code=403)
+    device_id = _require_device(request.headers, body.device_id)
+    if device_id is None:
+        return JSONResponse({"error": "DEVICE_AUTH_REQUIRED"}, status_code=401)
     rule_res = parse_rules(text)
     parsed = dict(rule_res)
     path = "rules"
@@ -868,7 +984,7 @@ def _reply_for_play(ma, args: dict, query: str) -> str:
 
 
 @app.post("/agent")
-def agent_endpoint(body: AgentIn) -> dict[str, Any]:
+def agent_endpoint(body: AgentIn, request: Request) -> dict[str, Any]:
     """Session 化 Agent 入口（v0.3 §10）。
 
     流程：Fast Path（确定性命令直接执行）→ 取/建 Session → 构建 Music Context
@@ -877,6 +993,17 @@ def agent_endpoint(body: AgentIn) -> dict[str, Any]:
     t0 = time.time()
     trace_id = uuid.uuid4().hex[:8]
     text = (body.text or "").strip()
+    if len(text) > 500:
+        return {"status": "error", "intent": "empty", "reply": "",
+                "actions": [], "session_id": body.session_id,
+                "trace_id": trace_id, "error": "text too long (max 500)"}
+    if not _check_origin(request.headers):
+        return {"status": "error", "error": "origin not allowed",
+                "session_id": body.session_id, "trace_id": trace_id}
+    device_id = _require_device(request.headers, body.device_id)
+    if device_id is None:
+        return {"status": "error", "error": "DEVICE_AUTH_REQUIRED",
+                "session_id": body.session_id, "trace_id": trace_id}
     timings: dict[str, float] = {}
 
     if not text:

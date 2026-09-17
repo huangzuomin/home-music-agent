@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS devices (
   device_id   TEXT PRIMARY KEY,          -- 服务端签发的设备标识
   name        TEXT,
   kind        TEXT,                      -- pwa / voice-client / satellite / api
-  token_hash  TEXT,                      -- 令牌哈希（IMP-04 落地，先占位）
+  token_hash  TEXT,                      -- 令牌哈希（明文 token 不落库）
+  revoked     INTEGER NOT NULL DEFAULT 0,
   created_at  TEXT NOT NULL
 );
 

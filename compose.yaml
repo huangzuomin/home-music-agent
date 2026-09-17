@@ -4,7 +4,9 @@
 # Phase 4: Voice Gateway（规则意图解析 → 经 HA script 下发音乐动作）
 services:
   home-assistant:
-    image: ghcr.io/home-assistant/home-assistant:stable
+        # IMP-04：固定已验证版本（2026.9.2 实测；升级走显式变更）
+# IMP-04：固定已验证版本（2026.9.2 实测；升级走显式变更）
+    image: ghcr.io/home-assistant/home-assistant:2026.9.2
     container_name: home-assistant
     network_mode: host
     restart: unless-stopped
@@ -15,7 +17,7 @@ services:
       TZ: Asia/Shanghai
 
   music-assistant:
-    image: ghcr.io/music-assistant/server:latest
+    image: ghcr.io/music-assistant/server:2.10.3
     container_name: music-assistant
     network_mode: host
     restart: unless-stopped
@@ -31,8 +33,10 @@ services:
     build: ./services/stt
     container_name: stt-service
     restart: unless-stopped
+    # IMP-04 端口收口：内部端口只绑回环；语音入口统一走 home-music-proxy(443)。
+    # ⚠️ 收口在部署授权窗口生效（Windows 客户端/固件需同步改走 HTTPS 入口）。
     ports:
-      - "8100:8100"
+      - "127.0.0.1:8100:8100"
     volumes:
       - ./data/models:/models:ro
       - ./config/stt:/config:ro
@@ -54,6 +58,8 @@ services:
     volumes:
       - /opt/home-music-agent/.env:/opt/home-music-agent/.env:ro
       - ./data/sessions:/app/data/sessions
+      # IMP-03a：控制核心 SQLite（命令/会话/授权），落在 VM 持久卷
+      - ./data/control:/app/data/control
     environment:
       TZ: Asia/Shanghai
       HA_BASE: "http://127.0.0.1:8123"
@@ -114,3 +120,26 @@ services:
       MA_URL: "http://127.0.0.1:8095"
       HA_URL: "http://127.0.0.1:8123"
       REJECT_DIR: "/app/data/reject"
+
+  # ---- IMP-00 实测回填：现场在跑但开源 compose 缺失的两个服务（R-NEW-03）----
+  home-music-pwa:
+    image: python:3.12-slim
+    container_name: home-music-pwa
+    restart: unless-stopped
+    working_dir: /www
+    command: python -m http.server 8000
+    volumes:
+      - ./services/pwa/www:/www:ro
+    ports:
+      - "127.0.0.1:8400:8000"
+
+  home-music-proxy:
+    image: caddy:2.11.4-alpine
+    container_name: home-music-proxy
+    restart: unless-stopped
+    volumes:
+      - ./services/https-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./services/https-proxy/ssl:/ssl
+    ports:
+      - "443:443"
+      - "80:80"

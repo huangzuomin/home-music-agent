@@ -1,0 +1,40 @@
+{
+ "generated": "2026-09-17",
+ "note": "IMP-04 版本固定锚点；升级须显式变更并重跑 preflight/验收",
+ "images": {
+  "home-assistant": {
+   "tag": "2026.9.2",
+   "running_version": "2026.9.2",
+   "image_id": "sha256:0fafae2139c2d143085e56a205d7c5603d20188f9ac2cfa4b8e1da1e57f28145"
+  },
+  "music-assistant": {
+   "tag": "2.10.3",
+   "running_version": "2.10.3 (label io.hass.version)",
+   "image_id": "sha256:db61b915e4fb3718aa6badbb65f6369fdf9027118666564d5611c996111c9147"
+  },
+  "caddy": {
+   "tag": "2.11.4-alpine",
+   "version": "v2.11.4",
+   "image_id": "sha256:af555904a0961945f16bb323a501457b13a4f7e9bde969b145b97da80b38ecbe"
+  },
+  "pwa-base": {
+   "tag": "python:3.12-slim",
+   "image_id": "sha256:ec7d6c95cd3692a2e2d228a8b1ca74e4025b54121fcc4c5da6f09cfa473315ad"
+  }
+ },
+ "local_built": {
+  "stt-service": {
+   "source": "services/stt",
+   "requirements": "sherpa-onnx>=1.10,<2 + fastapi/uvicorn"
+  },
+  "voice-gateway": {
+   "source": "services/voice-gateway",
+   "requirements": "见 requirements.txt"
+  },
+  "music-fetcher": {
+   "source": "services/music-fetcher",
+   "requirements": "musicdl==2.13.11 等"
+  }
+ },
+ "capability_probe": "tools/ma_capability_probe.py（IMP-03b 实测记录见 capability-matrix.md）"
+}

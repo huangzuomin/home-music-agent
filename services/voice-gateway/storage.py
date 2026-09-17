@@ -207,6 +207,28 @@ class ControlStore:
             (device_id, name, kind, _utcnow_iso()))
         self.connect().commit()
 
+    def set_device_token(self, device_id: str, token_hash: str) -> None:
+        """写入/更新设备令牌哈希（明文 token 不落库）。"""
+        self.connect().execute(
+            "UPDATE devices SET token_hash = ? WHERE device_id = ?",
+            (token_hash, device_id))
+        self.connect().commit()
+
+    def revoke_device(self, device_id: str) -> bool:
+        """撤销设备：置 revoked 标记并清空令牌哈希。"""
+        cur = self.connect().execute(
+            "UPDATE devices SET revoked = 1, token_hash = '' WHERE device_id = ?",
+            (device_id,))
+        self.connect().commit()
+        return cur.rowcount > 0
+
+    def get_device(self, device_id: str) -> dict[str, Any] | None:
+        row = self.connect().execute(
+            "SELECT device_id, name, kind, token_hash, created_at,"
+            " COALESCE(revoked, 0) AS revoked FROM devices"
+            " WHERE device_id = ?", (device_id,)).fetchone()
+        return dict(row) if row else None
+
     def set_binding(self, scope: str, player_id: str,
                     player_name: str = "") -> None:
         self.connect().execute(
