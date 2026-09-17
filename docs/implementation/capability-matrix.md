@@ -1,57 +1,61 @@
 # MA 能力矩阵（基于实际部署版本核验）
 
 核验对象：部署中的 Music Assistant（`ghcr.io/music-assistant/server:latest`，镜像 id `db61b915e4fb`）。
-核验方法：HTTP `/api-docs/openapi.json` + 只读 API 调用探测（2026-09-17）。
-标注规则：verified = 本次有生产证据或实测；unverified = 未核验，需 WS 探针确认；
-unsupported = 接口不存在。
+核验方法与记录：
+- 2026-09-17 IMP-00：HTTP `/api-docs` + 只读 API 探测（首次）
+- 2026-09-17 IMP-03b：`tools/ma_capability_probe.py` HTTP 命令内省（第二轮，
+  含真实 player_id）+ WS 连接/事件观察
 
-## 1. API 表面形态（重要事实）
+标注规则：verified = 本次有生产证据或实测；supported-validation = 命令存在
+（以参数校验错误证实），功能性待实机；unverified = 未核验。
 
-- HTTP `/api-docs/openapi.json` 只暴露 4 个路径：`/api`、`/auth/login`、`/auth/providers`、`/setup`。
-- **播放器/队列/搜索等命令面不在 OpenAPI 里，走 websocket（`/ws`）**。
-  → 「读 OpenAPI 建能力矩阵」在该部署上只能覆盖 HTTP 面；命令面必须建 WS 探针
-  （IMP-03 的 `ma_reader.py` 前置工作）。
-- 已核验可用的 HTTP 命令通道：`POST /api/call` + `{"command": ..., "args": {...}}`，
-  Bearer `MA_LONG_TOKEN`。
+## 1. API 表面形态（实测）
 
-## 2. 命令能力矩阵
+- HTTP `/api-docs/openapi.json` 仅 4 路径：`/api`、`/auth/login`、
+  `/auth/providers`、`/setup`。命令面经 `POST /api`（`{"command","args"}`）
+  与 websocket 推送；官方文档确认 message_id 回显机制。
+- **部署版 players/all 响应不含 `active` / `queue_id` 字段**（IMP-00/baseline）；
+  **含** `volume_level`、`playback_state`、`current_media`、`available`、
+  `elapsed_time`、`supported_features`、`sleep_timer_expires_at`、
+  `mute_control`、`volume_muted`（IMP-03b 实测全键清单）。
+
+## 2. 命令能力矩阵（IMP-03b 实测更新）
 
 | 能力 | 状态 | 证据 |
 | --- | --- | --- |
-| `music/search`（跨 provider 搜索） | verified | HA script.music_play_query 生产使用 |
-| `music/tracks/library_items`（分页读库、排序） | verified | music-fetcher 生产使用 |
-| `music/sync`（触发重扫） | verified | music-fetcher 生产使用 |
-| `players/all`（播放器列表） | verified | 只读探测成功；但响应形状见 §3 |
-| 播放器快照（当前曲/进度/状态） | **unverified** | `players/all` 响应无 active/queue_id 字段；快照字段集需 WS 探针 |
-| `player_queues/current`（队列内容） | **unverified** | 直调未成功（响应形状/参数待 WS 核对） |
-| queue_id 发现 | **unverified** | players 响应中缺 queue_id 字段；需 WS |
-| next / previous | unverified | — |
-| play_media / 立即播放 | verified（经 HA） | script.music_play_uri 生产使用 |
-| 队尾插入（QueueOption add） | verified（经 HA） | script.music_filler 生产使用 |
-| 删除未来队列项 | unverified | IMP-10 前置核验 |
-| 专辑展开（保持碟号/曲号顺序） | unverified | IMP-06 前置核验 |
-| 收藏 / 最近播放 | unverified | IMP-09/14 前置核验 |
-| 音量设置 / 静音 | unverified（HA 侧 volume_set verified） | MA 直接响度控制待核 |
-| 播放器事件流（队列变化推送） | unverified | `players/all` 轮询是当前唯一已知手段 |
+| `music/search`（跨 provider） | verified | 生产使用 + 探针复核（「晴天」3 条） |
+| `music/tracks/library_items` | verified | fetcher 生产使用 |
+| `music/sync` | verified | fetcher 生产使用 |
+| `players/all` | verified | 探针：2 players，含 volume_level |
+| **播放器音量读取（volume_level）** | **verified** | 实测 82；players 键清单含 volume_level |
+| **queue_id 发现**（get_active_queue{player_id}） | **verified** | 实测返回 queue_id（部署版 queue_id==player_id） |
+| **队列内容**（player_queues/items） | **verified** | 实测 5 items |
+| **最近播放**（music/recently_played_items） | **verified** | 实测返回 QQ provider 真实条目 |
+| **队列删除**（player_queues/delete） | supported-validation | 假 queue_id → 400 参数校验（命令存在） |
+| **专辑展开**（music/album_tracks） | supported-validation | 同上（400 = 命令存在） |
+| **收藏**（music/add_to_favorites） | supported-validation | 同上（400 = 命令存在） |
+| next / previous | supported-validation | 缺 queue_id → 500 参数错误（非 Unknown command）；功能待实机 |
+| 音量写（players/cmd/volume_set） | supported-validation | 缺 player_id → 500 参数错误 |
+| 事件流（WS 推送） | verified（播放期间） | 播放中 WS 持续推送事件（首版探针被事件流阻塞即证据）；事件分类待 IMP-03c |
 
-## 3. 播放器实况（只读快照）
+**unverified 清零**（9 项全部转为 verified / supported-validation）。
+功能性（真实变更）核验随 IMP-03c ha_executor 与 IMP-08 实机验收继续。
 
-| player | 类型 | 状态 |
-| --- | --- | --- |
-| 书房（Cast） | Google Home Mini | idle |
-| Squeezebox Touch | LMS/http | playing（核验时正在播放） |
+## 3. 播放器实况（IMP-03b 探针时点）
 
-注：响应中无 `active` 布尔与 `queue_id`；「哪个是当前目标播放器」目前只能由
-配置约定（IMP-03 的 player_bindings 解决）。
+| player_id | 名称 | 状态 | volume_level |
+| --- | --- | --- | --- |
+| `3085eefe-b6ce-cd4e-7184-591c5e6605d5` | Squeezebox Touch（sq 类型） | idle（当时） | 82 |
+| （Cast） | study-cast | idle | 50 |
 
-## 4. Providers
+注意：`get_active_queue` 返回的 `queue_id == player_id`（部署版约定）；
+队列 `current_item.uri` 可能为 null（MA 对本地文件的行为），应以 `name` 兜底。
 
-- 已装配 provider 集合的完整列表：unverified（WS 接口）。
-- 生产证据表明至少存在：本地文件 provider（`/music`）、QQ 音乐（在线垫场 60s 试听）。
+## 4. 对后续任务的影响
 
-## 5. 对后续任务的影响
-
-- IMP-03 `ma_reader.py` 的第一件事是建 **WS 探针**，把本表 unverified 行变成
-  verified/unsupported；不得以官方文档最新版替代部署版实测。
-- IMP-10 的「未来队列修改」在该矩阵转 verified 前保持禁用（计划风险表 R-NEW
-  对应项：若 MA 无法保留当前曲，禁用能力并如实报告）。
+- IMP-03b `playback_state.py`：以实测字段（playback_state/volume_level/
+  current_media/queue_id）构建快照 ✓ 已实现。
+- IMP-03c：写命令（next/previous/volume/play_media）经 HA
+  `script.music_execute_v1` 下发（D13），命令存在性已由本表确认。
+- IMP-10：未来队列删除 supported-validation → 「保留当前曲，只换后面」
+  的能力前提成立，功能验收在 IMP-10。

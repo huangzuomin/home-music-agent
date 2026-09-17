@@ -100,7 +100,13 @@ class MAClient:
     # ------------------------------------------------ 常用查询
 
     def pick_player(self) -> dict[str, Any]:
-        """选当前可用播放器（Touch 优先，其次任何 available）。缓存 30s。"""
+        """解析默认播放器（IMP-03b，T09/T22）。
+
+        契约：只认默认的 squeezebox-touch；它离线/不存在时**如实返回其
+        不可用状态**，不回退到其他播放器（读取、显示、写入必须是同一台）。
+        其他播放器经 player_bindings 显式绑定后使用（IMP-04 配对/绑定）。
+        缓存 30s。
+        """
         now = time.time()
         if self._player_cache and now - self._player_at < 30:
             return self._player_cache
@@ -109,14 +115,9 @@ class MAClient:
             players = players.get("result") or []
         chosen: dict[str, Any] = {}
         for p in players:
-            if p.get("available") and "squeezebox" in str(p.get("type", "")).lower():
-                chosen = p
+            if "squeezebox" in str(p.get("type", "")).lower():
+                chosen = p          # 命中默认绑定目标（available 与否都返回）
                 break
-        if not chosen:
-            for p in players:
-                if p.get("available"):
-                    chosen = p
-                    break
         self._player_cache, self._player_at = chosen, now
         return chosen
 
