@@ -21,7 +21,92 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from migrations import MIGRATIONS, load_sql
+# IMP-03a 迁移内联（避免 Docker COPY 对子目录的平铺问题）
+MIGRATIONS: list[tuple[int, str]] = [(1, "0001_init.sql")]
+
+
+def _load_migration_sql(version: int) -> str:
+    """0001 的建表 SQL 内联存储（不依赖外部 .sql 文件）。"""
+    if version == 1:
+        return """\
+CREATE TABLE IF NOT EXISTS meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS devices (
+  device_id   TEXT PRIMARY KEY,
+  name        TEXT,
+  kind        TEXT,
+  token_hash  TEXT,
+  revoked     INTEGER NOT NULL DEFAULT 0,
+  created_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS player_bindings (
+  scope        TEXT PRIMARY KEY,
+  player_id    TEXT NOT NULL,
+  player_name  TEXT,
+  updated_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS commands (
+  command_id    TEXT PRIMARY KEY,
+  device_id     TEXT NOT NULL,
+  request_id    TEXT NOT NULL,
+  action        TEXT NOT NULL,
+  args_json     TEXT,
+  player_id     TEXT,
+  intent_epoch  INTEGER NOT NULL,
+  status        TEXT NOT NULL,
+  result_json   TEXT,
+  content_fp    TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_commands_device_request
+  ON commands (device_id, request_id);
+CREATE INDEX IF NOT EXISTS idx_commands_status ON commands (status);
+CREATE INDEX IF NOT EXISTS idx_commands_epoch ON commands (intent_epoch);
+
+CREATE TABLE IF NOT EXISTS conversation_sessions (
+  session_id   TEXT PRIMARY KEY,
+  user_id      TEXT NOT NULL,
+  scene        TEXT,
+  goal         TEXT,
+  constraints_json TEXT,
+  created_at   TEXT NOT NULL,
+  last_active  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS listening_sessions (
+  listening_session_id TEXT PRIMARY KEY,
+  device_id    TEXT,
+  player_id    TEXT NOT NULL,
+  scene        TEXT,
+  status       TEXT NOT NULL,
+  started_at   TEXT NOT NULL,
+  ended_at     TEXT,
+  end_policy_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS feedback_events (
+  event_id    TEXT PRIMARY KEY,
+  device_id   TEXT,
+  session_id  TEXT,
+  signal      TEXT NOT NULL,
+  target_json TEXT,
+  note        TEXT,
+  t_epoch     REAL,
+  scope       TEXT NOT NULL DEFAULT 'public',
+  source      TEXT NOT NULL DEFAULT 'event',
+  legacy_uncertain INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_identity
+  ON feedback_events (signal, target_json);
+"""
+    raise ValueError(f"Unknown migration version: {version}")
+
 
 DEFAULT_DB_PATH = Path(os.environ.get(
     "CONTROL_DB_PATH", str(Path("data") / "control" / "control.db")))
@@ -66,7 +151,7 @@ class ControlStore:
         for version, filename in MIGRATIONS:
             if version in applied:
                 continue
-            conn.executescript(load_sql(version, filename))
+            conn.executescript(_load_migration_sql(version))
             conn.execute("INSERT INTO schema_migrations (version, applied_at) "
                          "VALUES (?, ?)", (version, _utcnow_iso()))
             conn.commit()

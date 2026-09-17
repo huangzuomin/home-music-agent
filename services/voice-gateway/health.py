@@ -125,7 +125,8 @@ class HealthChecker:
                                  self.nas_mount_point)
         checks["nas_mount"] = nas
 
-        critical = ["db_writable", "ha_reachable", "ma_reachable", "nas_mount"]
+        # IMP-04：只有 db/HA/MA 是关键（NAS/播放器/STT 不阻塞基本控制）
+        critical = ["db_writable", "ha_reachable", "ma_reachable"]
         ready = all(checks[k].get("ok") for k in critical)
         return {"ready": ready, "checks": checks,
                 "non_critical": ["stt_ready", "target_player_online"]}

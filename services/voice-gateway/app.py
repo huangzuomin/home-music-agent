@@ -309,12 +309,12 @@ def get_health_checker() -> health_mod.HealthChecker:
         _health_checker = health_mod.HealthChecker(
             db_path=str(store.db_path),
             ha_base=HA_BASE, ha_token=ha._token(),
-            ma_probe=lambda: ma.players() is not None,
-            player_available=lambda: bool(
+            ma_probe=lambda: ma.api("players/all") is not None,
+            target_player_available=lambda: bool(
                 (ma.pick_player() or {}).get("available", False)),
             stt_base=STT_BASE,
-            nas_expected_source=NAS_EXPECTED_SOURCE,
-            nas_mount_point=NAS_MOUNT_POINT,
+            nas_expected_source="",           # Docker 卷挂载无需匹配 NFS 来源
+            nas_mount_point="/music",          # Docker 容器内路径
             control_db_probe=lambda: store.db_path.exists(),
         )
     return _health_checker
