@@ -45,8 +45,9 @@ NAS：NFS v3 soft/tcp，`nas:/volume4/music → /mnt/music`（rw），7.3T/已�
 
 ## 配置文件
 
-- `/opt/home-music-agent/.env`：14 个键（HA/MA 凭据与 URL、STT_URL、LLM 三元组、
-  智谱备用三元组、HA 令牌三元组）；键名与 `.env.example` 对应；**值未读取**。
+- `/opt/home-music-agent/.env`：17 个键（HA/MA 凭据与 URL、STT_URL、LLM 三元组、
+  智谱备用三元组、HA 令牌三元组）；键名与 `baseline-manifest.json` 的
+  `env_keys` 对应；**值未读取**。
 - HA 包：`config/home-assistant/packages/home_music_agent.yaml`（单文件包，在位）。
 - Caddyfile：`services/https-proxy/Caddyfile` + `ssl/`。
 - 部署目录 `/opt/home-music-agent` **未纳入 git**（漂移风险 R-NEW-01）。
