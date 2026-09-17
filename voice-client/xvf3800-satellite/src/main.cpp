@@ -29,6 +29,7 @@ enum SatState : uint8_t { ST_IDLE, ST_CAPTURE, ST_STT, ST_AGENT };
 static SatState g_state = ST_IDLE;
 static bool g_wifi_ok = false;
 static bool wake_ok = false;          // 唤醒词引擎是否可用
+static bool g_muted = false;          // IMP-12：真实闭麦（输入端停止采集）
 
 static Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 static WiFiUDP g_udp;
@@ -39,6 +40,11 @@ static void ledSet(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 static void ledState(SatState st) {
+    // IMP-12（T15）：闭麦是最高优先级状态——红色实心，输入端停止采集。
+    if (g_muted) {
+        ledSet(120, 0, 0);
+        return;
+    }
     // IMP-02（T16）：无唤醒的 VAD 常驻是调试模式——空闲灯用琥珀色明示，
     // 与正式的绿色（唤醒模式待命）区分，避免家人误以为已受唤醒保护。
     if (st == ST_IDLE && !WAKE_ENABLED) {
