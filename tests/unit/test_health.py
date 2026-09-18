@@ -3,11 +3,6 @@ from __future__ import annotations
 
 import pytest
 
-import os
-import sys
-
-sys.path.insert(0, "D:/Work/home-music-agent/services/voice-gateway")
-
 import health as health_mod
 from health import HealthChecker
 

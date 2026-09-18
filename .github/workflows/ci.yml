@@ -14,14 +14,17 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
-      # 仅安装测试依赖与被测服务的运行依赖；不注入任何 secret。
+      # 运行依赖以 voice-gateway requirements 为 SSOT；测试层只追加 pytest/httpx。
       # 测试全部离线：不连家中 HA/MA/NAS，不触发下载或真实播放。
       - name: Install deps
         run: |
-          pip install -r requirements-dev.txt
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+      - name: Verify dependencies
+        run: python -m pip check
       - name: Run tests
         run: python -m pytest tests/ -q
