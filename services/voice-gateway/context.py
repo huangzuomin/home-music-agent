@@ -150,13 +150,16 @@ class TrackHistory:
     第一阶段**只记录**，不做策略调整。
     """
 
-    def __init__(self, path: pathlib.Path | None = None, keep: int = 20) -> None:
+    def __init__(self, path: pathlib.Path | None = None, keep: int = 20,
+                 event_store=None) -> None:
         self._path = path or HISTORY_PATH
         self._keep = keep
         self._lock = threading.Lock()
         self._tracks: list[dict[str, Any]] = []
         self._last_uri = ""
         self._last_started = 0.0
+        self._event_store = event_store      # IMP-09: PlaybackEventStore
+        self._current_instance_id = ""
         self._replay()
 
     def _replay(self) -> None:
@@ -205,6 +208,15 @@ class TrackHistory:
                    "uri": uri, "title": title, "artist": artist,
                    "duration": duration}
             self._tracks.append(rec)
+            # IMP-09：结算旧实例 + 开新实例（playback_events 表）
+            if self._event_store:
+                if self._current_instance_id:
+                    played = (time.time() - self._last_started) if self._last_started else 0
+                    reason = "natural_end" if played >= duration * 0.9 else "user_skip"
+                    self._event_store.end_instance(self._current_instance_id, reason,
+                                                   played, 0)
+                self._current_instance_id = self._event_store.start_instance(
+                    uri, title, artist)
             del self._tracks[:-self._keep]
             self._last_uri, self._last_started = uri, now
             self._write(rec)
