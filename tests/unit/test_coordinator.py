@@ -5,11 +5,6 @@ import uuid
 
 import pytest
 
-import os
-import sys
-
-sys.path.insert(0, "D:/Work/home-music-agent/services/voice-gateway")
-
 from contracts import CommandRequest
 from coordinator import CommandCoordinator
 from storage import ControlStore

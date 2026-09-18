@@ -1,11 +1,6 @@
 """IMP-06 — 搜索决策与场景就绪度（离线测试，样例数据自造）。"""
 from __future__ import annotations
 
-import os
-import sys
-
-sys.path.insert(0, "D:/Work/home-music-agent/services/voice-gateway")
-
 from catalog_resolver import resolve
 
 
