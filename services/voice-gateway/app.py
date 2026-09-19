@@ -1029,10 +1029,52 @@ def _local_hit(ma, query: str) -> bool:
     return False
 
 
-def _reply_for_play(ma, args: dict, query: str) -> str:
+def _search_variants(query: str) -> list[str]:
+    """派生搜索变体：原词 + 去歌手形式（「周杰伦的晴天」→「晴天」）。
+
+    实测（2026-09-19）：MA 本地索引对「歌手+的+歌名」这种连写匹配不上，
+    music/search("周杰伦的晴天") 只回 QQ 在线条目；而 music/search("晴天")
+    本地曲排第一。所以点播解析前先派生变体，原词始终保留在首位。
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+    variants = [q]
+    if "的" in q:
+        tail = q.rsplit("的", 1)[-1].strip()
+        if len(tail) >= 2 and tail not in variants:
+            variants.append(tail)
+    if " " in q or "　" in q:
+        tail = q.replace("　", " ").rsplit(" ", 1)[-1].strip()
+        if len(tail) >= 2 and tail not in variants:
+            variants.append(tail)
+    return variants
+
+
+def _resolve_local_query(ma, query: str) -> tuple[str, dict] | None:
+    """按变体顺序搜本地库，返回 (命中的变体, 曲目) 或 None。
+
+    判据与 _local_hit 相同（uri 以 library:// 开头），命中即回——
+    MA 对纯歌名会把本地曲排第一（实测 library://track/36 排在 QQ 结果前）。
+    """
+    try:
+        for variant in _search_variants(query):
+            for t in (ma.search(variant, limit=10) or []):
+                if str(t.get("uri") or "").startswith("library://"):
+                    return variant, t
+    except Exception:
+        return None      # 查不动就维持原词，走既有在线垫播 + 补库流程
+    return None
+
+
+def _reply_for_play(ma, args: dict, query: str,
+                    resolved: tuple[str, dict] | None = None) -> str:
     """music_play 的播报语：本地有 → 正常播；本地没有 → 说明会补库。"""
     if args.get("allow_backfill") is False:
         return "好，给你放%s" % query
+    if resolved is not None:
+        title = str(resolved[1].get("name") or query)
+        return "好，本地就有%s，给你放完整版" % title
     if _local_hit(ma, query):
         return "好，给你放%s" % query
     return "库里没有%s，先放个在线版垫着，完整的我在后台下" % query
@@ -1097,6 +1139,23 @@ def agent_endpoint(body: AgentIn, request: Request) -> dict[str, Any]:
             and not needs_agent(text, rule_res)):
         if rule_res.get("intent") in ("music_mute", "music_unmute")                 and not body.dry_run:
             _apply_mute_semantics(rule_res)
+        resolved: tuple[str, dict] | None = None
+        if (rule_res.get("intent") == "play_query"
+                and rule_res.get("script") == "music_play_query"):
+            # 点播先按变体搜本地库：MA 本地索引吃不下「歌手+的+歌名」连写
+            # （实测 music/search("周杰伦的晴天") 只回 QQ 在线条目 → 60s 试听
+            # 陷阱；music/search("晴天") 本地曲排第一）。命中就改写 query 再
+            # 进控制核心，曲单组队/补库逻辑原样保留。
+            resolved = _resolve_local_query(
+                get_ma(), (rule_res.get("variables") or {}).get("query") or "")
+            if resolved and resolved[0] != (
+                    rule_res.get("variables") or {}).get("query"):
+                rule_res["variables"]["query"] = resolved[0]
+                result["query_variant_used"] = resolved[0]
+                result["local_track"] = {
+                    "title": resolved[1].get("name"),
+                    "uri": resolved[1].get("uri"),
+                }
         action = (SCRIPT_TO_ACTION.get(rule_res["script"])
                   if CONTROL_CORE_V1 else None)
         if not body.dry_run:
@@ -1131,8 +1190,10 @@ def agent_endpoint(body: AgentIn, request: Request) -> dict[str, Any]:
         #      用户只会觉得「怎么才一分钟就停了」。
         reply = ""
         if rule_res["intent"] == "play_query":
+            # §9.1：动作本身就是回答，本地命中不播报；只有「库里没有」这一
+            # 例外要说 —— 在线试听只 60 秒，不说一句用户只会觉得播放坏了。
             q = (rule_res.get("variables") or {}).get("query") or ""
-            if q and not _local_hit(get_ma(), q):
+            if resolved is None and q and not _local_hit(get_ma(), q):
                 reply = "库里没有%s，先放个在线版垫着，完整的我在后台下" % q
         result.update({"intent": rule_res["intent"], "path": "fast",
                        "reply": reply,
@@ -1204,6 +1265,22 @@ def agent_endpoint(body: AgentIn, request: Request) -> dict[str, Any]:
         if kind == "script":
             if plan.get("script") == "music_volume_set" and                     planned.get("intent") in ("music_mute", "music_unmute"):
                 _apply_mute_semantics(plan)
+            resolved: tuple[str, dict] | None = None
+            if (plan.get("script") == "music_play_query"
+                    and not body.dry_run):
+                # 点播先按变体搜本地库：MA 本地索引吃不下「歌手+的+歌名」
+                # 连写（实测只回 QQ 在线条目 → 60s 试听陷阱）。命中变体就
+                # 改写 query 再交给 HA 脚本，曲单组队/补库逻辑原样保留。
+                resolved = _resolve_local_query(
+                    ma, (plan.get("variables") or {}).get("query") or "")
+                if resolved and resolved[0] != (
+                        plan.get("variables") or {}).get("query"):
+                    plan["variables"]["query"] = resolved[0]
+                    result["query_variant_used"] = resolved[0]
+                    result["local_track"] = {
+                        "title": resolved[1].get("name"),
+                        "uri": resolved[1].get("uri"),
+                    }
             if not body.dry_run:
                 result.update(ha.call_script(plan["script"],
                                              plan.get("variables")))
@@ -1213,7 +1290,8 @@ def agent_endpoint(body: AgentIn, request: Request) -> dict[str, Any]:
             result["actions"].append(plan["script"])
             if action["tool"] == "music_play":
                 reply = _reply_for_play(ma, action["args"],
-                                        action["args"].get("query") or "")
+                                        action["args"].get("query") or "",
+                                        resolved=resolved)
             elif action["tool"] == "music_fetch":
                 reply = "库里没有%s，我这就去找，下好自动播" % (
                     action["args"].get("query") or "")
