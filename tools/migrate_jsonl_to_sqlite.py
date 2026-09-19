@@ -101,11 +101,11 @@ CREATE TABLE IF NOT EXISTS feedback_events (
                     "INSERT OR IGNORE INTO feedback_events"
                     " (event_id, device_id, session_id, signal, target_json,"
                     "  note, t_epoch, scope, source, legacy_uncertain)"
-                    " VALUES (?,?,?,?,?,?,?,?, 'legacy', 1)",
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (eid, "legacy-migration", rec.get("session_id") or "",
                      fb.get("signal") or "",
                      json.dumps(fb.get("target") or {}, ensure_ascii=False),
-                     fb.get("note") or "", 0.0))
+                     fb.get("note") or "", 0.0, "public", "legacy", 1))
                 stats["feedback_events"] += 1
         conn.commit()
 

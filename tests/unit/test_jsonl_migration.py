@@ -4,11 +4,10 @@ from __future__ import annotations
 import json
 import sqlite3
 import pytest
-import sys
 import os
+import sys
 
-TOOLS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "tools")
-sys.path.insert(0, TOOLS_DIR)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "tools"))
 
 from migrate_jsonl_to_sqlite import migrate
 
@@ -21,27 +20,33 @@ def db(tmp_path):
 @pytest.fixture()
 def sess_file(tmp_path):
     f = tmp_path / "agent-sessions.jsonl"
-    f.write_text(json.dumps([
-        {"op": "create", "session_id": "s1", "session": {
+    lines = [
+        json.dumps({"op": "create", "session_id": "s1", "session": {
             "session_id": "s1", "user_id": "u1", "feedback": [],
             "conversation": [], "scene": "", "goal": ""}},
-        {"op": "update", "session_id": "s1", "patch": {
+            ensure_ascii=False),
+        json.dumps({"op": "update", "session_id": "s1", "patch": {
             "feedback": [{"signal": "track_positive",
                           "target": {"title": "晴天", "artist": "周杰伦",
                                       "uri": "library://31"},
                           "note": ""}]}},
-    ], ensure_ascii=False) + "\n")
+            ensure_ascii=False),
+    ]
+    f.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return str(f)
 
 
 @pytest.fixture()
 def track_file(tmp_path):
     f = tmp_path / "track-history.jsonl"
-    f.write_text("\n".join(
+    lines = [
         json.dumps({"op": "track", "uri": f"library://{i}",
                     "title": f"歌{i}", "artist": f"歌手{i}",
-                    "t": "2026-09-17T20:00:00+08:00", "duration": 200})
-        for i in range(3)) + "\n")
+                    "t": "2026-09-17T20:00:00+08:00", "duration": 200},
+                   ensure_ascii=False)
+        for i in range(3)
+    ]
+    f.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return str(f)
 
 
@@ -53,11 +58,10 @@ def test_migrate_creates_tables_and_populates(db, sess_file, track_file):
 
 def test_migrate_idempotent(db, sess_file, track_file):
     migrate(sess_file, track_file, db)
-    stats_1 = migrate(sess_file, track_file, db)
-    # 二次迁移不应产生新实例（INSERT OR IGNORE）
+    s1 = migrate(sess_file, track_file, db)
     conn = sqlite3.connect(db)
     count = conn.execute("SELECT COUNT(*) FROM play_instances").fetchone()[0]
-    assert count == 3  # 3 tracks from fixture
+    assert count == 3  # 不因重复迁移而增加
     conn.close()
 
 
