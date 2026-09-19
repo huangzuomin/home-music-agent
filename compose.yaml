@@ -45,7 +45,9 @@ services:
       TZ: Asia/Shanghai
       MODEL_DIR: /models/sense-voice
       NUM_THREADS: "2"
-      STT_LANGUAGE: auto
+      # 2026-09-19：auto 在短句+背景音下会误判语种（实测「播放周杰伦的晴天」
+      # 被转成「嗿斯播放…」式碎语）。家庭场景锁定中文。
+      STT_LANGUAGE: zh
 
   # Phase 4：语音意图网关。
   # 关键约束（D13）：本服务**不直连 MA**，音乐动作一律经 HA script 下发。
