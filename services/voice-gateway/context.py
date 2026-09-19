@@ -115,7 +115,12 @@ class MAClient:
             players = players.get("result") or []
         chosen: dict[str, Any] = {}
         for p in players:
-            if "squeezebox" in str(p.get("type", "")).lower():
+            # MA 2.x 把所有播放器的 type 统一成 "player"，厂商信息挪到了
+            # provider 字段（实测 squeezelite: type=player, provider=squeezelite）。
+            # 所以匹配要横扫 type/provider/name 三处，squeezebox/squeezelite 都认。
+            hay = " ".join(str(p.get(k) or "") for k in
+                           ("type", "provider", "name")).lower()
+            if "squeeze" in hay:
                 chosen = p          # 命中默认绑定目标（available 与否都返回）
                 break
         self._player_cache, self._player_at = chosen, now

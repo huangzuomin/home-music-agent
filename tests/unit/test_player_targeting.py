@@ -59,3 +59,19 @@ def test_t22_reads_and_writes_target_bound_player():
     for _ in range(3):
         p = mac.pick_player()
         assert p.get("player_id") == "sq-1"
+
+
+def test_ma2x_type_is_generic_player__match_by_provider():
+    """MA 2.x 回归：所有播放器 type 统一为 "player"，厂商挪进 provider
+    （2026-09-19 实测 squeezelite: type=player, provider=squeezelite）。
+    pick_player 必须在 type/provider/name 里找 squeeze，否则上下文永久为空。
+    """
+    mac = _make([
+        {"player_id": "cast-1", "name": "书房", "available": True,
+         "type": "player", "provider": "chromecast"},
+        {"player_id": "sq-1", "name": "squeezelite", "available": True,
+         "type": "player", "provider": "squeezelite"},
+        {"player_id": "web-1", "name": "Web (Chrome on Windows)",
+         "available": True, "type": "player", "provider": "sendspin"},
+    ])
+    assert mac.pick_player().get("player_id") == "sq-1"
